@@ -2,7 +2,7 @@ from dataclasses import dataclass
 import pandas as pd
 from typing import Dict, Any
 from scipy.sparse import csr_matrix
-
+from typing import Optional
 
 @dataclass
 class DataIngestionArtifacts:
@@ -27,21 +27,17 @@ class FeatureArtifacts:
       item_user_matrix:csr_matrix
 
 
+
 @dataclass
 class ModelTrainerArtifacts:
-      item_item_model_url:str
+    item_item_model_path: str
+    item_item_model_url: Optional[str]
+    item_item_run_id: str
+    item_item_metrics: dict
 
-      item_item_run_id:str
-
-      item_item_metrics:dict
-
-      sasrec_model_url:str
-
-      sasrec_run_id:str
-
-      sasrec_metrics:str
-
-
-
+    sasrec_model_path: str
+    sasrec_model_url: Optional[str]
+    sasrec_run_id: Optional[str]
+    sasrec_metrics: dict
 
 

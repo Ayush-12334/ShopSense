@@ -43,37 +43,25 @@ EVENTS_WEIGHTS={
 
 
 FEATURE_ENGINEERING_DIR_NAME : str ="Feature_Engineering"
-
-
-
 # ==============================
 # MLflow
 # ==============================
 
 MLFLOW_EXPERIMENT_NAME = "shopsense-production"
-
 ITEM_ITEM_REGISTERED_MODEL_NAME = "shopsense-item-item-cf"
-
 SASREC_REGISTERED_MODEL_NAME = "shopsense-sasrec"
-
-
 # ==============================
 # Item-Item CF
 # ==============================
-
 ITEM_ITEM_K = 50
-
-
 # ==============================
 # SASRec
 # ==============================
-
+PAD=0
+SESSION_GAP_MINUTES=30
 SASREC_MAX_SEQ_LEN = 50
-
 SASREC_D_MODEL = 64
-
 SASREC_N_HEADS = 2
-
 SASREC_N_LAYERS = 2
-
 SASREC_N_EPOCHS = 5
+

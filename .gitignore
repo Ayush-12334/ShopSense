@@ -68,3 +68,6 @@ mlruns/
 
 # Raw datasets
 datasets/*.csv
+
+
+mlflow.db
