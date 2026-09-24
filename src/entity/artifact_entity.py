@@ -27,7 +27,6 @@ class FeatureArtifacts:
       item_user_matrix:csr_matrix
 
 
-
 @dataclass
 class ModelTrainerArtifacts:
     item_item_model_path: str
@@ -39,5 +38,8 @@ class ModelTrainerArtifacts:
     sasrec_model_url: Optional[str]
     sasrec_run_id: Optional[str]
     sasrec_metrics: dict
+    popularity_model_path: str
+    popularity_model_url: Optional[str]
+    popularity_run_id: str
 
 

@@ -137,117 +137,190 @@ class SASREC:
         )
 
     def create_sequence(self, train_events, item_to_idx):
+
         try:
             logging.info("Creating SASRec session sequences")
-             # Copy original training data
 
             session_source = train_events.copy()
 
-            if pd.api.types.is_numeric_dtype(session_source['timestamp']):
-                session_source['timestamp']=pd.to_datetime(
-                    session_source['timestamp'],
-                    unit='ms',
-                    errors='coerce'
+            # --------------------------------------------------
+            # 1. Timestamp conversion
+            # --------------------------------------------------
+            if pd.api.types.is_numeric_dtype(
+                session_source["timestamp"]
+            ):
+                session_source["timestamp"] = pd.to_datetime(
+                    session_source["timestamp"],
+                    unit="ms",
+                    errors="coerce"
                 )
             else:
-                session_source['timestamp']=pd.to_datetime(
-                    session_source['timestamp'],
-                    errors='coerce'
-                            )
+                session_source["timestamp"] = pd.to_datetime(
+                    session_source["timestamp"],
+                    errors="coerce"
+                )
 
-
-
-
-
-           
-            session_source=session_source.dropna(
-                subset=['timestamp']
+            session_source = session_source.dropna(
+                subset=["timestamp"]
             )
 
+            logging.info(
+                f"Events after timestamp cleaning: "
+                f"{len(session_source):,}"
+            )
+
+            # --------------------------------------------------
+            # 2. Sort events
+            # --------------------------------------------------
             session_source = (
                 session_source
-                .sort_values(['visitorid', 'timestamp'])
+                .sort_values(
+                    ["visitorid", "timestamp"]
+                )
                 .copy()
-                
             )
 
-            session_source['time_diff'] = (
+            # --------------------------------------------------
+            # 3. Calculate time difference
+            # --------------------------------------------------
+            session_source["time_diff"] = (
                 session_source
-                .groupby('visitorid')['timestamp']
+                .groupby("visitorid")["timestamp"]
                 .diff()
                 .dt.total_seconds()
                 .fillna(0)
-                
             )
 
-            session_source['new_session'] = (
-                session_source['time_diff']
+            # --------------------------------------------------
+            # 4. Create session boundary
+            # --------------------------------------------------
+            session_source["new_session"] = (
+                session_source["time_diff"]
                 > self.config.session_gap_minutes * 60
             ).astype(int)
 
-            session_source['session_num'] = (
+            # --------------------------------------------------
+            # 5. Session number
+            # --------------------------------------------------
+            session_source["session_num"] = (
                 session_source
-                .groupby('visitorid')['new_session']
+                .groupby("visitorid")["new_session"]
                 .cumsum()
             )
 
-            session_source['item_idx'] = (
-                session_source['itemid'].map(item_to_idx)
+            # --------------------------------------------------
+            # 6. Normalize item IDs and map items
+            #    (cast both sides to str so dtype mismatches
+            #    between itemid and item_to_idx keys can't
+            #    silently drop every row)
+            # --------------------------------------------------
+            session_source["itemid"] = (
+                session_source["itemid"].astype(str)
             )
 
+            item_to_idx_normalized = {
+                str(item): idx
+                for item, idx in item_to_idx.items()
+            }
+
+            session_source["item_idx"] = (
+                session_source["itemid"]
+                .map(item_to_idx_normalized)
+            )
+
+            mapped_count = session_source["item_idx"].notna().sum()
+
+            logging.info(
+                f"Events successfully mapped to items: "
+                f"{mapped_count:,}"
+            )
+
+            logging.info(
+                f"Events missing item mapping: "
+                f"{session_source['item_idx'].isna().sum():,}"
+            )
+
+            # --------------------------------------------------
+            # SAFETY CHECK
+            # --------------------------------------------------
+            if mapped_count == 0:
+                raise ValueError(
+                    "No item IDs were mapped using item_to_idx. "
+                    "Check itemid datatype and item_to_idx keys."
+                )
+
+            # --------------------------------------------------
+            # 7. Remove unmapped items
+            # --------------------------------------------------
             session_source = session_source.dropna(
-                subset=['item_idx']
+                subset=["item_idx"]
             )
 
-            session_source['item_idx'] = (
-                session_source['item_idx'].astype(int)
+            session_source["item_idx"] = (
+                session_source["item_idx"]
+                .astype(int)
             )
 
+            # --------------------------------------------------
+            # 8. Create sessions
+            # --------------------------------------------------
             session_sequence = (
                 session_source
-                .groupby(['visitorid', 'session_num'])['item_idx']
+                .groupby(
+                    ["visitorid", "session_num"]
+                )["item_idx"]
                 .apply(list)
                 .tolist()
             )
-            print("Total sessions:", len(session_sequence))
-
 
             logging.info(
-                    f"5. Sequences before filtering: {len(session_sequence):,}"
-                )   
+                f"Total sessions created: "
+                f"{len(session_sequence):,}"
+            )
 
+            # --------------------------------------------------
+            # 9. Remove consecutive repeats
+            # --------------------------------------------------
             session_sequence = [
                 [
-                    item for i, item in enumerate(seq)
+                    item
+                    for i, item in enumerate(seq)
                     if i == 0 or item != seq[i - 1]
                 ]
                 for seq in session_sequence
             ]
 
             logging.info(
-                f"6. Sequences after removing repeats: {len(session_sequence):,}"
+                f"Sessions after removing consecutive repeats: "
+                f"{len(session_sequence):,}"
             )
-            print("After removing repeats:", len(session_sequence))
-            print("Example sessions:", session_sequence[:5])
 
+            # --------------------------------------------------
+            # 10. Keep sessions with >= 2 items
+            #     (training needs at least one input -> target pair)
+            # --------------------------------------------------
             session_sequence = [
-                seq for seq in session_sequence
+                seq
+                for seq in session_sequence
                 if len(seq) >= 2
             ]
 
             logging.info(
-                f"7. FINAL sequences >= 2 items: {len(session_sequence):,}"
+                f"FINAL valid SASRec sequences: "
+                f"{len(session_sequence):,}"
             )
-            
-            print("Sessions with >= 2 items:", len(session_sequence))
 
+            # --------------------------------------------------
+            # 11. Truncate to maximum sequence length
+            # --------------------------------------------------
             session_sequence = [
                 seq[-self.config.sasrec_max_seq_len:]
                 for seq in session_sequence
             ]
 
             logging.info(
-                f"Created {len(session_sequence):,} valid SASRec sequences"
+                f"Created {len(session_sequence):,} "
+                f"valid SASRec sequences"
             )
 
             return session_sequence
@@ -265,7 +338,7 @@ class SASREC:
 
             loader = DataLoader(
                 dataset,
-                batch_size=128,
+                batch_size=self.config.sasrec_batch_size,
                 shuffle=True
             )
 
@@ -297,7 +370,7 @@ class SASREC:
 
             optimizer = torch.optim.Adam(
                 self.model.parameters(),
-                lr=1e-3
+                lr=self.config.sasrec_learning_rate
             )
 
             bce = nn.BCEWithLogitsLoss(reduction='none')
@@ -361,11 +434,8 @@ class SASREC:
 
         except Exception as e:
             raise CustomeException(e, sys) from e
-        
 
-   
-
-    def build_last_session_by_user(self,train_events,item_to_idx):
+    def build_last_session_by_user(self, train_events, item_to_idx):
 
         try:
             logging.info(
@@ -374,10 +444,19 @@ class SASREC:
 
             sessions_source = train_events.copy()
 
-        # ---------------------------------------------------------
-        # 1. Timestamp conversion
-        # ---------------------------------------------------------
-            if not pd.api.types.is_datetime64_any_dtype(
+            # ---------------------------------------------------------
+            # 1. Timestamp conversion
+            #    (mirrors create_sequence(): numeric epoch-ms and
+            #    string/object timestamps need different handling.
+            #    Forcing unit="ms" on non-numeric data silently turns
+            #    every value into NaT, which is what was happening here.)
+            # ---------------------------------------------------------
+            if pd.api.types.is_datetime64_any_dtype(
+                sessions_source["timestamp"]
+            ):
+                pass  # already datetime, nothing to convert
+
+            elif pd.api.types.is_numeric_dtype(
                 sessions_source["timestamp"]
             ):
                 sessions_source["timestamp"] = pd.to_datetime(
@@ -386,20 +465,41 @@ class SASREC:
                     errors="coerce"
                 )
 
+            else:
+                sessions_source["timestamp"] = pd.to_datetime(
+                    sessions_source["timestamp"],
+                    errors="coerce"
+                )
+
             sessions_source = sessions_source.dropna(
                 subset=["timestamp"]
             )
 
-        # ---------------------------------------------------------
-        # 2. Sort
-        # ---------------------------------------------------------
+            logging.info(
+                f"Events after timestamp cleaning: "
+                f"{len(sessions_source):,}"
+            )
+
+            # ---------------------------------------------------------
+            # SAFETY CHECK
+            # ---------------------------------------------------------
+            if len(sessions_source) == 0:
+                raise ValueError(
+                    "Timestamp cleaning removed all rows in "
+                    "build_last_session_by_user(). Check the dtype "
+                    "and format of train_events['timestamp']."
+                )
+
+            # ---------------------------------------------------------
+            # 2. Sort
+            # ---------------------------------------------------------
             sessions_source = sessions_source.sort_values(
                 ["visitorid", "timestamp"]
             ).copy()
 
-        # ---------------------------------------------------------
-        # 3. Time difference
-        # ---------------------------------------------------------
+            # ---------------------------------------------------------
+            # 3. Time difference
+            # ---------------------------------------------------------
             sessions_source["time_diff"] = (
                 sessions_source
                 .groupby("visitorid")["timestamp"]
@@ -408,28 +508,49 @@ class SASREC:
                 .fillna(0)
             )
 
-        # ---------------------------------------------------------
-        # 4. Session boundary
-        # ---------------------------------------------------------
+            # ---------------------------------------------------------
+            # 4. Session boundary
+            # ---------------------------------------------------------
             sessions_source["new_session"] = (
                 sessions_source["time_diff"]
                 > self.config.session_gap_minutes * 60
             ).astype(int)
 
-        # ---------------------------------------------------------
-        # 5. Session number
-        # ---------------------------------------------------------
+            # ---------------------------------------------------------
+            # 5. Session number
+            # ---------------------------------------------------------
             sessions_source["session_num"] = (
                 sessions_source
                 .groupby("visitorid")["new_session"]
                 .cumsum()
             )
 
-        # ---------------------------------------------------------
-        # 6. Item mapping
-        # ---------------------------------------------------------
+            # ---------------------------------------------------------
+            # 6. Normalize item IDs and map items
+            # ---------------------------------------------------------
+            sessions_source["itemid"] = (
+                sessions_source["itemid"].astype(str)
+            )
+
+            item_to_idx_normalized = {
+                str(item): idx
+                for item, idx in item_to_idx.items()
+            }
+
             sessions_source["item_idx"] = (
-                sessions_source["itemid"].map(item_to_idx)
+                sessions_source["itemid"]
+                .map(item_to_idx_normalized)
+            )
+
+            mapped_count = sessions_source["item_idx"].notna().sum()
+            missing_count = sessions_source["item_idx"].isna().sum()
+
+            logging.info(
+                f"Events successfully mapped: {mapped_count:,}"
+            )
+
+            logging.info(
+                f"Events missing item mapping: {missing_count:,}"
             )
 
             sessions_source = sessions_source.dropna(
@@ -440,9 +561,9 @@ class SASREC:
                 sessions_source["item_idx"].astype(int)
             )
 
-        # ---------------------------------------------------------
-        # 7. Create sessions
-        # ---------------------------------------------------------
+            # ---------------------------------------------------------
+            # 7. Create sessions
+            # ---------------------------------------------------------
             sessions = (
                 sessions_source
                 .groupby(
@@ -455,9 +576,13 @@ class SASREC:
                 .reset_index()
             )
 
-        # ---------------------------------------------------------
-        # 8. Remove consecutive repeats
-        # ---------------------------------------------------------
+            logging.info(
+                f"Total sessions created: {len(sessions):,}"
+            )
+
+            # ---------------------------------------------------------
+            # 8. Remove consecutive repeats
+            # ---------------------------------------------------------
             sessions["items"] = sessions["items"].apply(
                 lambda seq: [
                     item
@@ -466,16 +591,23 @@ class SASREC:
                 ]
             )
 
-        # ---------------------------------------------------------
-        # 9. Keep valid sessions
-        # ---------------------------------------------------------
+            # ---------------------------------------------------------
+            # 9. DO NOT require >= 2 items here
+            #
+            # This function is for inference.
+            # A session with one item can still be useful as context.
+            # ---------------------------------------------------------
             sessions = sessions[
-                sessions["items"].apply(len) >= 2
+                sessions["items"].apply(len) >= 1
             ]
 
-        # ---------------------------------------------------------
-        # 10. Last session per user
-        # ---------------------------------------------------------
+            logging.info(
+                f"Valid inference sessions: {len(sessions):,}"
+            )
+
+            # ---------------------------------------------------------
+            # 10. Last session per user
+            # ---------------------------------------------------------
             last_sessions = (
                 sessions
                 .sort_values("timestamp")
@@ -498,7 +630,6 @@ class SASREC:
             return last_session_by_user
 
         except Exception as e:
-         
             raise CustomeException(e, sys) from e
 
     def sasrec_score_candidates(
@@ -508,27 +639,25 @@ class SASREC:
         last_session_by_user,
         sasrec_model,
         device,
-        max_seq_len=50  
+        max_seq_len=50
     ):
         try:
             logging.info("creating score candidates")
-
-                
 
             session = last_session_by_user.get(visitor_id)
 
             if not session:
                 return None
 
-        # Keep only last MAX_SEQ_LEN items
+            # Keep only last MAX_SEQ_LEN items
             seq = session[-max_seq_len:]
 
-        # SASRec uses:
-        # 0 = PAD
-        # item indices = 1, 2, 3, ...
+            # SASRec uses:
+            # 0 = PAD
+            # item indices = 1, 2, 3, ...
             seq = [item + 1 for item in seq]
 
-        # Left padding
+            # Left padding
             pad_len = max_seq_len - len(seq)
 
             input_seq = torch.tensor(
@@ -541,26 +670,26 @@ class SASREC:
 
             with torch.no_grad():
 
-            # User/session representation
+                # User/session representation
                 hidden = sasrec_model(
                     input_seq
                 )[0, -1]
 
-            # Candidate items also need +1
+                # Candidate items also need +1
                 cand_tensor = torch.tensor(
                     [item + 1 for item in candidate_item_idx],
                     dtype=torch.long,
                     device=device
                 )
 
-            # Dot product:
-            # user/session representation
-            # × item embedding
+                # Dot product:
+                # user/session representation
+                # × item embedding
                 scores = (
                     hidden.unsqueeze(0)
                     * sasrec_model.item_emb(cand_tensor)
                 ).sum(-1)
 
             return scores.cpu().numpy()
-        except Exception as e :
-            raise CustomeException(e,sys) from e
+        except Exception as e:
+            raise CustomeException(e, sys) from e

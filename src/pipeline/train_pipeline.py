@@ -229,3 +229,6 @@ if __name__ == "__main__":
     print(model_artifacts.sasrec_model_path)
 
     print("\nModel training completed.")
+
+    print("\nPopularity Model:")
+    print(model_artifacts.popularity_model_path)

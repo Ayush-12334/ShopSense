@@ -15,6 +15,10 @@ from src.entity.artifact_entity import (
 from src.evaluation.evaluate import build_eval_set, evaluate
 from src.models.model import train_item_item
 from src.components.sasrec import SASREC
+from src.models.item_item_mlflow import ItemItemModel
+from src.components.popularity import train_popularity_model
+from src.models.sasrec_mlflow import SASRecModel
+from src.models.popularity_mlflow import PopularityModelWrapper
 
 
 class ModelTrainer:
@@ -125,28 +129,35 @@ class ModelTrainer:
                 )
 
 
-                # --------------------------------------------------
-                # 6. Log metrics to MLflow
-                # --------------------------------------------------
-
-                # evaluate() returns:
-                #
-                # (
-                #     {
-                #         "Recall@5": ...,
-                #         "Recall@10": ...,
-                #         ...
-                #     },
-                #     total
-                # )
-                #
-                # Therefore unpack it first.
-
                 recall_metrics, total_users = metrics
 
                 item_model_path=self.save_item_item(
                        item_model
-                    )         
+                    )
+
+                mlflow.pyfunc.log_model(
+                    name="item_item_model",
+                    python_model=ItemItemModel(
+                        n_items=feature_artifacts.user_item_matrix.shape[1]
+
+                    ),
+                    artifacts={
+                        "item_item_model":item_model_path
+                    },
+
+                    registered_model_name=self.config.item_item_register_name,
+                    code_paths=["src/models/item_item_mlflow.py"],
+                    pip_requirements=[
+                        "mlflow",
+                        "scipy",
+                        "numpy",
+                        "pandas",
+                        "implicit"
+                    ]
+
+
+
+                )         
             
 
 
@@ -189,31 +200,198 @@ class ModelTrainer:
                 sys
             ) from e
 
+    def train_sasrec(self, train_events, feature_artifacts):
 
-
-
-
-    def train_sasrec(self,train_events,feature_artifacts):
 
         try:
-            logging.info("starting SASrec training")
 
-            sasrec=SASREC(
-                model_trainer_config=self.config
+            with mlflow.start_run(run_name="sasrec") as run:
+
+                # --------------------------------------------------
+                # 1. Parameters
+                # --------------------------------------------------
+
+                mlflow.log_params({
+                    "max_seq_len": self.config.sasrec_max_seq_len,
+                    "d_model": self.config.sasrec_d_model,
+                    "n_heads": self.config.sasrec_n_heads,
+                    "n_layers": self.config.sasrec_n_layers,
+                    "dropout": self.config.sasrec_dropout,
+                    "epochs": self.config.sasrec_n_epochs,
+                    "batch_size": self.config.sasrec_batch_size,
+                    "learning_rate": self.config.sasrec_learning_rate,
+                    "session_gap_minutes":
+                        self.config.session_gap_minutes,
+                    "n_items":
+                        len(feature_artifacts.item_to_idx)
+                })
+
+                # --------------------------------------------------
+                # 2. Create SASRec object
+                # --------------------------------------------------
+
+                sasrec = SASREC(
+                    model_trainer_config=self.config
+                )
+
+                # --------------------------------------------------
+                # 3. Create sequences
+                # --------------------------------------------------
+
+                session_sequences = sasrec.create_sequence(
+                    train_events,
+                    feature_artifacts.item_to_idx
+                )
+
+                # --------------------------------------------------
+                # 4. Train
+                # --------------------------------------------------
+
+                sasrec_model = sasrec.train(
+                    session_sequences,
+                    len(feature_artifacts.item_to_idx)
+                )
+
+                # --------------------------------------------------
+                # 5. Save local model
+                # --------------------------------------------------
+
+                sasrec_model_path = self.save_sasrec(
+                    sasrec_model
+                )
+
+                # --------------------------------------------------
+                # 6. Build last sessions
+                # --------------------------------------------------
+
+                last_session_by_user = (
+                    sasrec.build_last_session_by_user(
+                        train_events,
+                        feature_artifacts.item_to_idx
+                    )
+                )
+
+                # --------------------------------------------------
+                # 7. Log local model as artifact
+                # --------------------------------------------------
+
+                mlflow.log_artifact(
+                    sasrec_model_path,
+                    artifact_path="sasrec_weights"
+                )
+
+                # --------------------------------------------------
+                # 8. Log feature mappings
+                # --------------------------------------------------
+
+                import pickle
+
+                item_to_idx_path = "item_to_idx.pkl"
+
+                with open(item_to_idx_path, "wb") as f:
+                    pickle.dump(
+                        feature_artifacts.item_to_idx,
+                        f
+                    )
+
+                mlflow.log_artifact(
+                    item_to_idx_path,
+                    artifact_path="features"
+                )
+
+                # --------------------------------------------------
+                # 9. Log last sessions
+                # --------------------------------------------------
+
+                last_session_path = "last_session_by_user.pkl"
+
+                with open(last_session_path, "wb") as f:
+                    pickle.dump(
+                        last_session_by_user,
+                        f
+                    )
+
+                mlflow.log_artifact(
+                    last_session_path,
+                    artifact_path="features"
+                )
+
+                # --------------------------------------------------
+                # 10. MLflow PyFunc registration
+                # --------------------------------------------------
+
+                
+
+                mlflow.pyfunc.log_model(
+                    artifact_path="sasrec_model",
+
+                    python_model=SASRecModel(
+                        n_items=len(
+                            feature_artifacts.item_to_idx
+                        ),
+                        max_len=self.config.sasrec_max_seq_len,
+                        d_model=self.config.sasrec_d_model,
+                        n_heads=self.config.sasrec_n_heads,
+                        n_layers=self.config.sasrec_n_layers,
+                        dropout=self.config.sasrec_dropout,
+
+                        item_to_idx=
+                            feature_artifacts.item_to_idx,
+
+                        idx_to_item=
+                            feature_artifacts.idx_to_item,
+
+                        last_session_by_user=
+                            last_session_by_user
+                    ),
+
+                    artifacts={
+                        "sasrec_model":
+                            sasrec_model_path
+                    },
+
+                    registered_model_name=
+                        self.config.sasrec_registered_name,
+
+                    code_paths=[
+                        "src/components/sasrec.py",
+                        "src/models/sasrec_mlflow.py"
+                    ],
+
+                    pip_requirements=[
+                        "mlflow",
+                        "torch",
+                        "numpy",
+                        "pandas"
+                    ]
+                )
+
+                # --------------------------------------------------
+                # 11. Return MLflow run information
+                # --------------------------------------------------
+
+                sasrec_run_id = run.info.run_id
+
+                logging.info(
+                    f"SASRec MLflow run ID: {sasrec_run_id}"
+                )
+
+                logging.info(
+                    f"SASRec model path: {sasrec_model_path}"
+                )
+
+                return (
+                    sasrec,
+                    sasrec_model,
+                    sasrec_model_path,
+                    sasrec_run_id,
+                    last_session_by_user
             )
 
-            session_sequence=sasrec.create_sequence(train_events=train_events,item_to_idx=feature_artifacts.item_to_idx)
-
-            n_items=len(feature_artifacts.item_to_idx)
-
-            sasrec_model=sasrec.train(session_sequences=session_sequence,n_items=n_items)
-
-            logging.info("SASrec training completed ")
-
-            return sasrec,sasrec_model
-
         except Exception as e:
-            raise CustomeException(e,sys) from e
+        
+
+            raise CustomeException(e, sys) from e
 
     # ==================== SAVE ITEM_ITEM ====================
 
@@ -366,7 +544,76 @@ class ModelTrainer:
         except Exception as e:
 
             raise CustomeException(e,sys) from e
+
+    
+
+    def train_popularity(self,train_events:pd.DataFrame,feature_artifacts:FeatureArtifacts):
+
+        try:
+            logging.info("Starting Popularity model training")
+
+            with mlflow.start_run(run_name="popularity") as run:
+                mlflow.log_param("halflife_days",self.config.popularity_halflife_days)
+                mlflow.log_param("n_items",len(feature_artifacts.item_to_idx))
+
+
+                popularity_model=train_popularity_model(train_events=train_events,item_to_idx=feature_artifacts.item_to_idx,halflife_days=self.config.popularity_halflife_days)
+
+                logging.info("popularity model training completed")
+                # --------------------------------------------------
+                # 3. Save staging file
+                # -------------------------------------------------
+
+                os.makedirs(self.config.model_trainer_dir,exist_ok=True)
+                popularity_model_path = self.config.popularity_model_path
+                with open(popularity_model_path,"wb") as f:
+                    pickle.dump(popularity_model,f)
+                # --------------------------------------------------
+                # 4. Register model in MLflow
+                # --------------------------------------------------
+                
+                mlflow.pyfunc.log_model(name='popularity_model',python_model=PopularityModelWrapper(),
+
+                                    artifacts={"popularity_model":popularity_model_path},
+                                    registered_model_name=self.config.popularity_registry_name,
+                                    code_paths=[
+                                        "src/components/popularity.py",
+                                        "src/models/popularity_mlflow.py",
+                                        
+                                    ],
+
+                                    pip_requirements=[
+                                        "mlflow",
+                                        "numpy",
+                                        "pandas"
+                                    ]
+
+
+                                        )
+            popularity_run_id=(
+                run.info.run_id
+            )
+
             
+            popularity_model_url=(
+                f"runs:/{popularity_run_id}/popularity_model"
+            )
+
+            logging.info(f"popularity mlflow run ID:"
+                            f"{popularity_run_id}")
+
+            return(
+                popularity_model,
+                popularity_model_path,
+                popularity_run_id,
+                popularity_model_url
+            )
+
+        except Exception as e:
+            raise CustomeException(e,sys)
+
+
+
     # ==========================================================
     # INITIATE MODEL TRAINING
     # ==========================================================
@@ -428,30 +675,22 @@ class ModelTrainer:
                 "Item-Item Model training completed"
             )
 
-            # item_item_model_path=self.save_item_item(
-            #     item_model
-            #     )
-            
-
-            sasrec,sasrec_model=self.train_sasrec(
+            (
+                sasrec,
+                sasrec_model,
+                sasrec_model_path,
+                sasrec_run_id,
+                last_session_by_user
+            ) = self.train_sasrec(
                 train_events=train_events,
                 feature_artifacts=feature_artifacts
             )
+
+
+            
            
             logging.info("SASrec training completed")
 
-            sasrec_model_path = self.save_sasrec(
-                sasrec_model
-                        )
-            last_session_by_user = self.build_last_sessions(
-
-                sasrec=sasrec,
-                train_events=train_events,
-                feature_artifacts=feature_artifacts
-                )
-            # --------------------------------------------------
-            # 6. Evaluate Item-Item CF + SASRec
-            # --------------------------------------------------
 
             (
                 sasrec_metrics,
@@ -467,20 +706,40 @@ class ModelTrainer:
             )
 
            
-            # 6. Create model artifacts
+            (
+                popularity_model,
+                popularity_model_path,
+                popularity_run_id,
+                popularity_model_url
+            ) = self.train_popularity(
+                train_events=train_events,
+                feature_artifacts=feature_artifacts
+            )
+                        
 
+            
+    
             model_artifacts = ModelTrainerArtifacts(
+
                 item_item_model_path=item_item_model_path,
-                item_item_model_url=item_item_model_path,
+                item_item_model_url=f"runs:/{item_item_run_id}/item_item_model",
                 item_item_run_id=item_item_run_id,
                 item_item_metrics=item_item_metrics,
+                
 
                 sasrec_model_path=sasrec_model_path,
-                sasrec_model_url=sasrec_model_path,
-                sasrec_run_id=None,
-                sasrec_metrics=sasrec_metrics
+                sasrec_model_url=f"runs:/{sasrec_run_id}/sasrec_model",
+                sasrec_run_id=sasrec_run_id,
+                sasrec_metrics=sasrec_metrics,
+
+                popularity_model_path=popularity_model_path,
+                popularity_model_url=popularity_model_url,
+                popularity_run_id=popularity_run_id
             )
 
+
+
+           
             logging.info("model training completed")
 
             return model_artifacts

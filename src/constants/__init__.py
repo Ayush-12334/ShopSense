@@ -1,7 +1,4 @@
 import os 
-
-
-
 # ============================================================
 # Pipeline
 # ============================================================
@@ -64,4 +61,8 @@ SASREC_D_MODEL = 64
 SASREC_N_HEADS = 2
 SASREC_N_LAYERS = 2
 SASREC_N_EPOCHS = 5
+
+
+POPULARITY_REGISTERED_MODEL_NAME="shopsense_popularity"
+
 

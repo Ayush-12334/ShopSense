@@ -125,6 +125,7 @@ class ModelTrainerConfig:
     session_gap_minutes: int = SESSION_GAP_MINUTES
 
     pad: int = PAD
+    
 
     # --------------------------------------------------------
     # SASRec training
@@ -156,5 +157,23 @@ class ModelTrainerConfig:
     sasrec_registered_name: str = (
         SASREC_REGISTERED_MODEL_NAME
     )
+
+
+    # =========================
+    # Popularity / Cold Start
+    # =========================
+
+    popularity_halflife_days:float=14
+
+    popularity_registry_name:str=(POPULARITY_REGISTERED_MODEL_NAME)
+
+    
+    popularity_model_path: str = os.path.join(
+        model_trainer_dir,
+        "popularity_model.pkl"
+    )
+ 
+
+
 
    
