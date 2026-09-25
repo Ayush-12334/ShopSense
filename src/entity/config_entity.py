@@ -1,5 +1,5 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass,field
 from datetime import datetime
 
 from src.constants import *
@@ -175,5 +175,15 @@ class ModelTrainerConfig:
  
 
 
-
+@dataclass
+class CatalogConfig:
+    item_properties_paths: list = field(default_factory=lambda: [
+        "datasets/item_properties_part1.csv",
+        "datasets/item_properties_part2.csv"
+    ])
+    category_tree_path: str = "datasets/category_tree.csv"
+    train_events_path: str = "src/artifacts/08_11_2026_15_06_34/data_ingestion/ingested/train.csv"
+    item_to_idx_path: str = "item_to_idx.pkl"
+    output_catalog_path: str = "product_catalog.parquet"
+    max_category_depth: int = 20
    
