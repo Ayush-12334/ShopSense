@@ -186,4 +186,129 @@ class CatalogConfig:
     item_to_idx_path: str = "item_to_idx.pkl"
     output_catalog_path: str = "product_catalog.parquet"
     max_category_depth: int = 20
-   
+
+
+# ============================================================
+# PREDICTION PIPELINE CONFIG
+# ============================================================
+
+@dataclass
+class PredictionConfig:
+    run_dir: str = None
+
+    feature_artifacts_path: str = None
+    item_item_model_path: str = None
+    sasrec_model_path: str = None
+    popularity_model_path: str = None
+    last_session_path: str = None
+
+    catalog_path: str = "product_catalog.parquet"
+
+    candidate_pool_size: int = 200
+    min_history: int = 2
+
+    sasrec_max_seq_len: int = SASREC_MAX_SEQ_LEN
+    sasrec_d_model: int = SASREC_D_MODEL
+    sasrec_n_heads: int = SASREC_N_HEADS
+    sasrec_n_layers: int = SASREC_N_LAYERS
+    sasrec_dropout: float = 0.2
+
+    @classmethod
+    def from_latest_run(cls):
+        artifacts_root = os.path.join(
+            PIPELINE_NAME,
+            ARTIFACT_DIR
+        )
+
+        if not os.path.exists(artifacts_root):
+            raise FileNotFoundError(
+                f"Artifacts directory not found: {artifacts_root}"
+            )
+
+        run_dirs = [
+            os.path.join(artifacts_root, name)
+            for name in os.listdir(artifacts_root)
+            if os.path.isdir(
+                os.path.join(artifacts_root, name)
+            )
+        ]
+
+        if not run_dirs:
+            raise FileNotFoundError(
+                "No training runs found in artifacts directory."
+            )
+
+        run_dirs.sort(
+            key=os.path.getmtime,
+            reverse=True
+        )
+
+        required_files = [
+            os.path.join(
+                "model_trainer",
+                "item_item_model.pkl"
+            ),
+            os.path.join(
+                "model_trainer",
+                "sasrec_model.pt"
+            ),
+            os.path.join(
+                "model_trainer",
+                "popularity_model.pkl"
+            ),
+            os.path.join(
+                "model_trainer",
+                "feature_artifacts.pkl"
+            ),
+            os.path.join(
+                "model_trainer",
+                "last_session_by_user.pkl"
+            )
+        ]
+
+        selected_run = None
+
+        for run_dir in run_dirs:
+            if all(
+                os.path.exists(
+                    os.path.join(run_dir, file)
+                )
+                for file in required_files
+            ):
+                selected_run = run_dir
+                break
+
+        if selected_run is None:
+            raise FileNotFoundError(
+                "No complete training run found with "
+                "all required prediction artifacts."
+            )
+
+        model_trainer_dir = os.path.join(
+            selected_run,
+            "model_trainer"
+        )
+
+        return cls(
+            run_dir=selected_run,
+            feature_artifacts_path=os.path.join(
+                model_trainer_dir,
+                "feature_artifacts.pkl"
+            ),
+            item_item_model_path=os.path.join(
+                model_trainer_dir,
+                "item_item_model.pkl"
+            ),
+            sasrec_model_path=os.path.join(
+                model_trainer_dir,
+                "sasrec_model.pt"
+            ),
+            popularity_model_path=os.path.join(
+                model_trainer_dir,
+                "popularity_model.pkl"
+            ),
+            last_session_path=os.path.join(
+                model_trainer_dir,
+                "last_session_by_user.pkl"
+            )
+        )

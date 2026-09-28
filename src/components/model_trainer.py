@@ -303,7 +303,9 @@ class ModelTrainer:
                 # 9. Log last sessions
                 # --------------------------------------------------
 
-                last_session_path = "last_session_by_user.pkl"
+                
+                last_session_path=os.path.join(self.config.model_trainer_dir,"last_session_by_user.pkl")
+
 
                 with open(last_session_path, "wb") as f:
                     pickle.dump(
@@ -385,7 +387,8 @@ class ModelTrainer:
                     sasrec_model,
                     sasrec_model_path,
                     sasrec_run_id,
-                    last_session_by_user
+                    last_session_by_user,
+                    last_session_path
             )
 
         except Exception as e:
@@ -436,23 +439,23 @@ class ModelTrainer:
             raise CustomeException(e, sys) from e
 
 
-    def build_last_sessions(self,sasrec,train_events,feature_artifacts):
+    # def build_last_sessions(self,sasrec,train_events,feature_artifacts):
 
-        try:
-            logging.info("Building last session for sasrec inference")
-            last_session_by_user=sasrec.build_last_session_by_user(
-                train_events=train_events,
-                item_to_idx=feature_artifacts.item_to_idx
-            )
+    #     try:
+    #         logging.info("Building last session for sasrec inference")
+    #         last_session_by_user=sasrec.build_last_session_by_user(
+    #             train_events=train_events,
+    #             item_to_idx=feature_artifacts.item_to_idx
+    #         )
 
-            logging.info(
-                f"last session created for"
-                f"{len(last_session_by_user):,} users"
+    #         logging.info(
+    #             f"last session created for"
+    #             f"{len(last_session_by_user):,} users"
 
-            )
-            return last_session_by_user
-        except Exception as e :
-            raise CustomeException(e,sys) from e
+    #         )
+    #         return last_session_by_user
+    #     except Exception as e :
+    #         raise CustomeException(e,sys) from e
 
     def cf_sasrec_rerank(self,user_idx,N,item_model,sasrec,sasrec_model,last_session_by_user,feature_artifacts,candidate_pool_size=200):
         try:
@@ -612,7 +615,35 @@ class ModelTrainer:
         except Exception as e:
             raise CustomeException(e,sys)
 
-
+    def save_feature_artifacts(self,feature_artifacts):
+            try:
+    
+                os.makedirs(
+                    self.config.model_trainer_dir,
+                    exist_ok=True
+                )
+    
+                feature_artifacts_path = os.path.join(
+                    self.config.model_trainer_dir,
+                    "feature_artifacts.pkl"
+                )
+    
+                with open(feature_artifacts_path,"wb") as f:
+                    pickle.dump(
+                      feature_artifacts,
+                       f
+                    )
+    
+                logging.info(
+    
+                    f"Feature artifacts saved: "
+                    f"{feature_artifacts_path}"
+                )
+    
+                return feature_artifacts_path
+    
+            except Exception as e:
+               raise CustomeException(e,sys) from e
 
     # ==========================================================
     # INITIATE MODEL TRAINING
@@ -634,6 +665,7 @@ class ModelTrainer:
             # --------------------------------------------------
             # 1. Build evaluation dataset
             # --------------------------------------------------
+            feature_artifacts_path=self.save_feature_artifacts(feature_artifacts=feature_artifacts)
 
             (
                 eval_user_idx,
@@ -680,7 +712,8 @@ class ModelTrainer:
                 sasrec_model,
                 sasrec_model_path,
                 sasrec_run_id,
-                last_session_by_user
+                last_session_by_user,
+                last_session_path
             ) = self.train_sasrec(
                 train_events=train_events,
                 feature_artifacts=feature_artifacts
@@ -734,7 +767,12 @@ class ModelTrainer:
 
                 popularity_model_path=popularity_model_path,
                 popularity_model_url=popularity_model_url,
-                popularity_run_id=popularity_run_id
+                popularity_run_id=popularity_run_id,
+
+
+                feature_artifacts_path=feature_artifacts_path,
+                last_session_path=last_session_path
+
             )
 
 
@@ -754,3 +792,5 @@ class ModelTrainer:
         except Exception as e:
 
             raise CustomeException(e,sys) from e
+
+   

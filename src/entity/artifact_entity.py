@@ -41,5 +41,7 @@ class ModelTrainerArtifacts:
     popularity_model_path: str
     popularity_model_url: Optional[str]
     popularity_run_id: str
+    feature_artifacts_path: str
+    last_session_path: str
 
 
