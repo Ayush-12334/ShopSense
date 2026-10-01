@@ -45,11 +45,9 @@ class ModelTrainer:
     # ==========================================================
 
     def train_item_item(
-        self,
-        feature_artifacts: FeatureArtifacts,
-        eval_user_idx,
-        eval_targets
-    ):
+    self,
+    feature_artifacts: FeatureArtifacts,eval_user_idx,eval_targets,eval_already_seen,train_events,catalog_df):
+        
 
         try:
 
@@ -117,11 +115,16 @@ class ModelTrainer:
                 # 5. Evaluate model
                 # --------------------------------------------------
 
-                metrics = evaluate(
-                    item_item_fn,
-                    eval_user_idx,
-                    eval_targets,
-                    feature_artifacts.idx_to_item
+                metrics,total_users = evaluate(
+                    recommend_fn=item_item_fn,
+                    eval_user_idx=eval_user_idx,
+                    eval_targets=eval_targets,
+                    idx_to_item=feature_artifacts.idx_to_item,
+                    catalog_df=catalog_df,
+                    train_df=train_events,
+                    item_to_idx=feature_artifacts.item_to_idx,
+                    eval_already_seen=eval_already_seen
+                
                 )
 
                 logging.info(
@@ -129,7 +132,7 @@ class ModelTrainer:
                 )
 
 
-                recall_metrics, total_users = metrics
+                
 
                 item_model_path=self.save_item_item(
                        item_model
@@ -160,18 +163,25 @@ class ModelTrainer:
                 )         
             
 
-
-                mlflow.log_metrics(
-                    {
-                        key.replace("@", "_at_"): value
-                        for key, value in recall_metrics.items()
+                metric_values={
+                    key.replace("@","_at_"):value
+                    for key,value in metrics.items()
+                    if key not in {
+                        "Total_Evaluation_Users",
+                        "Repeat_Target_Count",
+                        "Novel_Target_Count"
                     }
-                )
+                }
 
-                mlflow.log_metric(
-                    "evaluation_users",
-                    total_users
-                )
+                mlflow.log_metrics(metric_values)
+
+                mlflow.log_params({
+                    "evaluation_users":total_users,
+                    "repeat_target_count": metrics["Repeat_Target_Count"],
+                    "novel_target_count": metrics["Novel_Target_Count"]
+                })
+
+
 
                 mlflow.log_artifact(
                     item_model_path,
@@ -188,7 +198,7 @@ class ModelTrainer:
 
                 return (
                     run.info.run_id,
-                    recall_metrics,
+                    metrics,
                     item_model,
                     item_model_path
                 )
@@ -510,39 +520,75 @@ class ModelTrainer:
         except  Exception as e :
             raise CustomeException(e,sys) from e
 
-    def evaluate_cf_sasrec(self,item_model,sasrec,sasrec_model,last_session_by_user,feature_artifacts,eval_user_idx,eval_targets):  
+    
+    def evaluate_cf_sasrec(self,item_model,sasrec,sasrec_model,last_session_by_user,feature_artifacts,eval_user_idx,eval_targets,eval_already_seen,train_events,catalog_df):  
+    
 
         try:
 
             logging.info(
                 "Evaluating Item-Item CF + SASRec"
             )
+            with mlflow.start_run(run_name="cf_sasrec") as run:
 
-            def rerank_fn(user_idx, N):
+                mlflow.log_params({
+                    "candidate_pool_size":200,
+                    "evaluation_users":len(eval_user_idx),
+                    "n_items":len(feature_artifacts.item_to_idx)
 
-                return self.cf_sasrec_rerank(
-                    user_idx=user_idx,
-                    N=N,
-                    item_model=item_model,
-                    sasrec=sasrec,
-                    sasrec_model=sasrec_model,
-                    last_session_by_user=last_session_by_user,
-                    feature_artifacts=feature_artifacts,
-                    candidate_pool_size=200
+                })
+
+                def rerank_fn(user_idx, N):
+
+                    return self.cf_sasrec_rerank(
+                        user_idx=user_idx,
+                        N=N,
+                        item_model=item_model,
+                        sasrec=sasrec,
+                        sasrec_model=sasrec_model,
+                        last_session_by_user=last_session_by_user,
+                        feature_artifacts=feature_artifacts,
+                        candidate_pool_size=200
+                    )
+
+                metrics, total_users = evaluate(
+                            recommend_fn=rerank_fn,
+                            eval_user_idx=eval_user_idx,
+                            eval_targets=eval_targets,
+                            idx_to_item=feature_artifacts.idx_to_item,
+                            catalog_df=catalog_df,
+                            train_df=train_events,
+                            item_to_idx=feature_artifacts.item_to_idx,
+                            eval_already_seen=eval_already_seen
+                        )
+                logging.info(
+                    f"Item-Item CF + SASRec metrics: {metrics}"
                 )
 
-            metrics, total_users = evaluate(
-                rerank_fn,
-                eval_user_idx,
-                eval_targets,
-                feature_artifacts.idx_to_item
-            )
+                metric_values= {
+                    key.replace("@","_at_"):value
+                    for key,value in metrics.items()
+                    if key not in{
+                        "Total_Evaluation_Users",
+                        "Repeat_Target_Count",
+                        "Novel_Target_Count"
+                    }
 
-            logging.info(
-                f"Item-Item CF + SASRec metrics: {metrics}"
-            )
+                }
 
-            return metrics, total_users
+                mlflow.log_metrics(metric_values)
+
+                mlflow.log_params({
+                    "evaluation_users":total_users,
+                    "repeat_target_count": metrics["Repeat_Target_Count"],
+                    "novel_target_count": metrics["Novel_Target_Count"]
+
+                })
+                logging.info(
+                    f"CF + SasRec Mlflow run ID: {run.info.run_id}"
+                )
+
+                return metrics, total_users
 
         except Exception as e:
 
@@ -648,6 +694,38 @@ class ModelTrainer:
     # ==========================================================
     # INITIATE MODEL TRAINING
     # ==========================================================
+    def load_catalog(self):
+        try:
+            catalog_path = "product_catalog.parquet"
+
+            if not os.path.exists(catalog_path):
+                raise FileNotFoundError(
+                    f"Product catalog not found: {catalog_path}"
+                )
+
+            catalog_df = pd.read_parquet(catalog_path)
+
+            required_columns = {
+                "model_item_idx",
+                "category_id"
+            }
+
+            missing = required_columns - set(catalog_df.columns)
+
+            if missing:
+                raise ValueError(
+                    f"Product catalog is missing columns: {missing}"
+                )
+
+            logging.info(
+                f"Product catalog loaded: "
+                f"{len(catalog_df):,} rows"
+            )
+
+            return catalog_df
+
+        except Exception as e:
+            raise CustomeException(e, sys) from e
 
     def initiate_model_training(
         self,
@@ -687,6 +765,7 @@ class ModelTrainer:
                 f"Novel targets: "
                 f"{(~eval_already_seen).sum():,}"
             )
+            catalog_df = self.load_catalog()
 
         # --------------------------------------------------
         # 2. Train Item-Item CF
@@ -698,9 +777,13 @@ class ModelTrainer:
                 item_model,
                 item_item_model_path
             ) = self.train_item_item(
-                feature_artifacts,
-                eval_user_idx,
-                eval_targets
+                feature_artifacts=feature_artifacts,
+                eval_user_idx=eval_user_idx,
+                eval_targets=eval_targets,
+                eval_already_seen=eval_already_seen,
+                train_events=train_events,
+                catalog_df=catalog_df
+                
             )
 
             logging.info(
@@ -735,7 +818,11 @@ class ModelTrainer:
                 last_session_by_user=last_session_by_user,
                 feature_artifacts=feature_artifacts,
                 eval_user_idx=eval_user_idx,
-                eval_targets=eval_targets
+                eval_targets=eval_targets,
+                eval_already_seen=eval_already_seen,
+                train_events=train_events,
+                catalog_df=catalog_df
+                
             )
 
            

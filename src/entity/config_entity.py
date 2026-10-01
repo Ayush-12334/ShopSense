@@ -29,6 +29,29 @@ class TrainingPipelineConfig:
 training_pipeline_config = TrainingPipelineConfig()
 
 
+@dataclass
+class EventStoreConfig:
+
+    event_store_path: str = (
+        "shopsense_events.db"
+    )
+
+    event_weights: dict = field(
+        default_factory=lambda: {
+            "view": 1,
+            "click": 2,
+            "add_to_cart": 3,
+            "transaction": 5
+        }
+    )
+
+    max_events_per_session: int = 200
+
+    max_recommendations_per_request: int = 50
+
+    min_session_history: int = 2
+
+
 # ============================================================
 # DATA INGESTION CONFIG
 # ============================================================
@@ -312,3 +335,37 @@ class PredictionConfig:
                 "last_session_by_user.pkl"
             )
         )
+# @dataclass
+# class EventStoreConfig:
+#     event_store_path: str = "shopsense_events.db"
+#     event_weights: dict = field(default_factory=lambda: {
+#         "view": 1,
+#         "click": 2,
+#         "add_to_cart": 3,
+#         "transaction": 5
+#     })
+#     max_events_per_session: int = 200
+#     max_recommendations_per_request: int = 50
+#     min_session_history: int = 2
+
+# @dataclass
+# class EventStoreConfig:
+
+#     event_store_path: str = (
+#         "shopsense_events.db"
+#     )
+
+#     event_weights: dict = field(
+#         default_factory=lambda: {
+#             "view": 1,
+#             "click": 2,
+#             "add_to_cart": 3,
+#             "transaction": 5
+#         }
+#     )
+
+#     max_events_per_session: int = 200
+
+#     max_recommendations_per_request: int = 50
+
+#     min_session_history: int = 2

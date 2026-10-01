@@ -152,7 +152,47 @@ class PredictionPipeline:
 
         except Exception as e:
             raise CustomeException(e, sys) from e
+        
+    def predict_similar(self, retailrocket_item_id, N=10):
+        try:
+            if N <= 0:
+                raise ValueError("N must be greater than 0")
 
+            retailrocket_item_id = int(retailrocket_item_id)
+
+            item_to_idx = self.feature_artifacts.item_to_idx
+
+            if retailrocket_item_id not in item_to_idx:
+                logging.warning(
+                    f"Item {retailrocket_item_id} not found in training vocabulary"
+                )
+                return []
+
+            model_item_idx = item_to_idx[retailrocket_item_id]
+
+            logging.info(
+                f"SIMILAR PRODUCT | retailrocket_id={retailrocket_item_id} "
+                f"| model_idx={model_item_idx}"
+            )
+
+            return self.recommendation_pipeline.recommend_similar(
+                model_item_idx=model_item_idx,
+                N=N
+            )
+
+        except Exception as e:
+            raise CustomeException(e, sys) from e
+    def predict_from_live_history(self,user_vector,item_sequence,N=10):
+
+        try:
+            return self.recommendation_pipeline.recommend_from_live_history(
+                user_vector=user_vector,
+                item_sequence=item_sequence,
+                N=N
+            )
+        except Exception as e:
+
+            raise CustomeException(e, sys) from e
 
 if __name__ == "__main__":
     prediction_pipeline = PredictionPipeline()

@@ -693,3 +693,52 @@ class SASREC:
             return scores.cpu().numpy()
         except Exception as e:
             raise CustomeException(e, sys) from e
+
+    def sasrec_score_candidates_from_sequence(self,item_sequence,candidate_item_idx,sasrec_model,device,max_seq_len=50):
+
+        try:
+
+            logging.info(
+                "SASRec: scoring candidates from live user sequence"
+            )
+
+            if not item_sequence:
+                return None
+
+            seq = item_sequence[-max_seq_len:]
+
+            seq = [int(item) + 1 for item in seq]
+
+            pad_len = max_seq_len - len(seq)
+
+            input_seq = torch.tensor(
+                [[PAD] * pad_len + seq],
+                dtype=torch.long,
+                device=device
+            )
+
+            sasrec_model.eval()
+
+            with torch.no_grad():
+
+                hidden = sasrec_model(
+                    input_seq
+                )[0, -1]
+
+                cand_tensor = torch.tensor(
+                    [int(item) + 1 for item in candidate_item_idx],
+                    dtype=torch.long,
+                    device=device
+                )
+
+                scores = (
+                    hidden.unsqueeze(0)
+                    * sasrec_model.item_emb(cand_tensor)
+                ).sum(-1)
+
+            return scores.cpu().numpy()
+
+        except Exception as e:
+            raise CustomeException(e, sys) from e
+
+        

@@ -159,7 +159,136 @@ class RecommendationPipeline:
 
         except Exception as e:
             raise CustomeException(e, sys) from e
+    def recommend_similar(self, model_item_idx, N=10):
+            try:
+                if N <= 0:
+                    raise ValueError("N must be greater than 0")
 
+                model_item_idx = int(model_item_idx)
+
+                if model_item_idx not in self.catalog_by_model_idx.index:
+                    logging.warning(
+                        f"Model item index {model_item_idx} not found in catalog"
+                    )
+                    return []
+
+                logging.info(
+                    f"SIMILAR: finding products similar to item {model_item_idx}"
+                )
+
+                similar_ids, scores = self.item_model.similar_items(
+                    model_item_idx,
+                    N=N + 1
+                )
+
+                candidates = [
+                    int(item_idx)
+                    for item_idx in similar_ids
+                    if int(item_idx) != model_item_idx
+                ][:N]
+
+                logging.info(
+                    f"SIMILAR: found {len(candidates)} similar products"
+                )
+
+                return self._attach_catalog_information(
+                    candidates,
+                    "similar_products"
+                )
+
+            except Exception as e:
+                raise CustomeException(e, sys) from e
+
+    def recommend_from_live_history(self,user_vector,item_sequence,N=10):
+
+        try:
+
+            if N <= 0:
+                raise ValueError("N must be greater than 0")
+
+            if user_vector is None or user_vector.nnz == 0:
+                logging.warning("LIVE HISTORY: empty user vector")
+                return []
+
+            if not item_sequence:
+                logging.warning("LIVE HISTORY: empty item sequence")
+                return []
+
+            # --------------------------------------------------
+            # 1. Item-Item CF candidate generation
+            # --------------------------------------------------
+            logging.info(
+                "LIVE HISTORY: generating Item-Item CF candidates"
+            )
+
+            ranked_items, cf_scores = self.item_model.recommend(
+                userid=0,
+                user_items=user_vector,
+                N=self.candidate_pool_size,
+                filter_already_liked_items=False
+            )
+
+            candidates = [
+                int(item_idx)
+                for item_idx in ranked_items
+            ]
+
+            logging.info(
+                f"LIVE HISTORY: Item-Item CF returned "
+                f"{len(candidates)} candidates"
+            )
+
+            if not candidates:
+                logging.warning(
+                    "LIVE HISTORY: Item-Item CF returned no candidates"
+                )
+                return []
+
+            # --------------------------------------------------
+            # 2. SASRec reranking
+            # --------------------------------------------------
+            scores = self.sasrec.sasrec_score_candidates_from_sequence(
+                item_sequence=item_sequence,
+                candidate_item_idx=candidates,
+                sasrec_model=self.sasrec_model,
+                device=self.sasrec.device,
+                max_seq_len=self.sasrec_max_seq_len
+            )
+
+            # --------------------------------------------------
+            # 3. Fallback to CF ranking if SASRec cannot score
+            # --------------------------------------------------
+            if scores is None:
+                logging.info(
+                    "LIVE HISTORY: SASRec returned None. "
+                    "Using Item-Item CF ranking."
+                )
+
+                final_items = candidates[:N]
+
+            else:
+                logging.info(
+                    f"LIVE HISTORY: SASRec scored "
+                    f"{len(scores)} candidates. Reranking."
+                )
+
+                order = np.argsort(-scores)
+
+                final_items = [
+                    candidates[i]
+                    for i in order[:N]
+                ]
+
+            # --------------------------------------------------
+            # 4. Attach product catalog information
+            # --------------------------------------------------
+            return self._attach_catalog_information(
+                final_items,
+                "item_item_cf_sasrec_live"
+            )
+
+        except Exception as e:
+            raise CustomeException(e, sys) from e
     def print_recommendations(self, user_id=None, N=10):
         try:
             recommendations = self.recommend(user_id=user_id, N=N)

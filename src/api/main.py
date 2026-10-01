@@ -4,7 +4,7 @@ from src.api.schemas import RecommendationRequest, RecommendationResponse
 
 
 app=FastAPI(
-    tile="Shopsense Recommendation API",
+    title="Shopsense Recommendation API",
     description="recommendation API powered by Item-Item CF ,SASRec and popularity",
     version="1.0.0"
 )
