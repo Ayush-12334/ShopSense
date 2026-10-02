@@ -1,0 +1,26 @@
+# Core Data Processing
+numpy==2.5.1
+pandas==2.3.3
+scipy==1.18.0
+pyarrow==25.0.1
+
+# Machine Learning
+scikit-learn==1.9.0
+implicit==0.7.3
+joblib==1.5.3
+
+# Deep Learning - SASRec
+torch==2.13.0+cpu
+
+# Experiment Tracking / Model Management
+mlflow==3.15.1
+
+# Application
+streamlit==1.64.0
+pydantic==2.13.4
+PyYAML==6.0.3
+python-dotenv==1.2.2
+
+# Utilities
+tqdm==4.70.0
+requests==2.34.2

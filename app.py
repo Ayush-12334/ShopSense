@@ -1,1002 +1,569 @@
-"""
-app.py -- ShopSense storefront.
-
-Reuses, never duplicates:
-    RecommendationService -> all recommendations, similar products,
-                             event logging
-    PredictionPipeline    -> loaded once inside RecommendationService
-    EventStore            -> accessed through RecommendationService
-    CatalogBrowser        -> read-only browsing/search/catalog lookup
-    SessionManager        -> session ID generation
-
-Streamlit session_state contains UI state only.
-Persistent behavioral history belongs to EventStore.
-"""
+import re
 
 import streamlit as st
 
-from src.database.services.recommendation_service import RecommendationService
-from src.database.catalog_browser import CatalogBrowser
-from src.database.services.session_manager import SessionManager
+from src.database.services.recommendation_service import (
+    RecommendationService
+)
+from src.database.services.session_manager import (
+    SessionManager
+)
 
 
-# ======================================================================
-# PAGE CONFIGURATION
-# ======================================================================
+# ============================================================
+# PAGE CONFIG
+# ============================================================
 
 st.set_page_config(
     page_title="ShopSense",
     page_icon="🛍️",
-    layout="wide"
+    layout="wide",
 )
 
 
-# ======================================================================
+# ============================================================
 # BACKEND
-# ======================================================================
+# ============================================================
 
 @st.cache_resource
-def load_service():
+def get_service():
     return RecommendationService()
 
 
-@st.cache_resource
-def load_catalog():
-    return CatalogBrowser()
+service = get_service()
 
 
-try:
-    service = load_service()
-    catalog = load_catalog()
-except Exception as backend_error:
-    st.error(
-        "ShopSense is temporarily unavailable. "
-        "Please try again shortly."
-    )
-
-    with st.expander("Technical details"):
-        st.exception(backend_error)
-
-    st.stop()
-
-
-# ======================================================================
+# ============================================================
 # SESSION STATE
-# ======================================================================
+# ============================================================
 
 if "session_id" not in st.session_state:
-    st.session_state.session_id = SessionManager.new_session_id()
+    st.session_state.session_id = (
+        SessionManager.new_session_id()
+    )
 
 if "user_id" not in st.session_state:
-    st.session_state.user_id = None
+    st.session_state.user_id = ""
 
-if "page" not in st.session_state:
-    st.session_state.page = "home"
+if "recommendations" not in st.session_state:
+    st.session_state.recommendations = []
 
-if "selected_item" not in st.session_state:
-    st.session_state.selected_item = None
-
-if "cart" not in st.session_state:
-    st.session_state.cart = []
-
-if "dev_mode" not in st.session_state:
-    st.session_state.dev_mode = False
-
-if "selected_category" not in st.session_state:
-    st.session_state.selected_category = "All"
-
-if "search_term" not in st.session_state:
-    st.session_state.search_term = ""
+if "model_source" not in st.session_state:
+    st.session_state.model_source = None
 
 
-# ======================================================================
-# RECOMMENDATION SOURCE LABELS
-# ======================================================================
+# ============================================================
+# CLEAN PRODUCT NAME
+# ============================================================
 
-SOURCE_LABELS = {
-    "popularity": "Popular with other shoppers",
-    "popularity_fallback": "Popular with other shoppers",
-    "item_item_cf_sasrec": "Based on your shopping behavior",
-    "similar_products": "Similar items",
-    "personalized_session": "Based on what you viewed today",
-}
+def clean_product_name(name):
 
+    if name is None:
+        return None
 
-def friendly_label(source):
-    return SOURCE_LABELS.get(
-        source,
-        "Recommended for you"
+    name = str(name)
+
+    # Remove HTML tags such as:
+    # <div>, <span>, <p>, etc.
+    name = re.sub(
+        r"<[^>]+>",
+        "",
+        name
     )
 
+    # Remove common HTML entities
+    name = name.replace(
+        "&nbsp;",
+        " "
+    )
 
-# ======================================================================
-# SAFE BACKEND CALL
-# ======================================================================
+    name = name.replace(
+        "&amp;",
+        "&"
+    )
 
-def safe_call(
-    fn,
-    default=None,
-    error_label="Something went wrong"
-):
+    name = name.replace(
+        "&lt;",
+        "<"
+    )
+
+    name = name.replace(
+        "&gt;",
+        ">"
+    )
+
+    # Remove extra whitespace
+    name = " ".join(
+        name.split()
+    )
+
+    return name.strip()
+
+
+# ============================================================
+# MODEL LABEL
+# ============================================================
+
+def get_model_name(source):
+
+    source = str(
+        source or ""
+    ).lower()
+
+    if source in {
+        "popularity",
+        "popularity_fallback",
+    }:
+
+        return "🔥 Popularity"
+
+    if source in {
+        "item_item_cf_sasrec",
+        "cf_sasrec",
+    }:
+
+        return "🧠 Item-Item CF + SASRec"
+
+    if source == "sasrec":
+
+        return "🧠 SASRec"
+
+    if source == "personalized_session":
+
+        return "🧠 Session Personalization"
+
+    if source == "similar_products":
+
+        return "🔗 Similar Products"
+
+    if source:
+
+        return f"🧠 {source}"
+
+    return "Recommendation Engine"
+
+
+# ============================================================
+# GET RECOMMENDATIONS
+# ============================================================
+
+def load_recommendations():
+
+    user_id = (
+        st.session_state.user_id.strip()
+    )
+
+    if not user_id:
+
+        st.warning(
+            "Please enter a User ID."
+        )
+
+        return
+
     try:
-        return fn()
+
+        recommendations = (
+            service.get_recommendations(
+                user_id=user_id,
+                session_id=(
+                    st.session_state.session_id
+                ),
+                N=10,
+            )
+        )
+
+        st.session_state.recommendations = (
+            recommendations or []
+        )
+
+        if recommendations:
+
+            st.session_state.model_source = (
+                recommendations[0].get(
+                    "recommendation_source"
+                )
+            )
+
+        else:
+
+            st.session_state.model_source = None
 
     except Exception as e:
+
         st.error(
-            f"{error_label}. Please try again."
+            "Unable to generate recommendations."
         )
 
-        if st.session_state.dev_mode:
-            st.exception(e)
-
-        return default
+        st.exception(e)
 
 
-# ======================================================================
-# NAVIGATION
-# ======================================================================
+# ============================================================
+# RECORD TRANSACTION
+# ============================================================
 
-def go_to_home():
-    st.session_state.page = "home"
-    st.rerun()
+def record_transaction(item_id):
 
+    user_id = (
+        st.session_state.user_id.strip()
+    )
 
-def go_to_product(item_id, log_view=True):
-    st.session_state.selected_item = item_id
-    st.session_state.page = "product"
+    if not user_id:
 
-    if log_view:
-        safe_call(
-            lambda: service.log_interaction(
-                item_id=item_id,
-                event_type="view",
-                user_id=st.session_state.user_id,
-                session_id=st.session_state.session_id
+        st.warning(
+            "Please enter a User ID."
+        )
+
+        return
+
+    try:
+
+        service.log_interaction(
+
+            user_id=user_id,
+
+            session_id=(
+                st.session_state.session_id
             ),
-            error_label="Could not record this view"
+
+            item_id=item_id,
+
+            event_type="transaction",
         )
 
-    st.rerun()
+        st.success(
+            f"Transaction recorded for item {item_id}."
+        )
+
+        # Refresh recommendations
+        load_recommendations()
+
+    except Exception as e:
+
+        st.error(
+            "Could not record transaction."
+        )
+
+        st.exception(e)
 
 
-# ======================================================================
-# SIDEBAR
-# ======================================================================
+# ============================================================
+# HEADER
+# ============================================================
 
-with st.sidebar:
+st.title(
+    "🛍️ ShopSense"
+)
 
-    st.title("🛍️ ShopSense")
+st.caption(
+    "Personalized Recommendation System"
+)
 
-    st.caption(
-        "Shopping recommendations that adapt to your behavior"
+
+# ============================================================
+# USER INPUT
+# ============================================================
+
+st.subheader(
+    "Enter User ID"
+)
+
+input_col, button_col = st.columns(
+    [4, 1]
+)
+
+
+with input_col:
+
+    st.session_state.user_id = st.text_input(
+
+        "User ID",
+
+        value=st.session_state.user_id,
+
+        placeholder="Example: 7, 100, 999",
+
+        label_visibility="collapsed",
+    )
+
+
+with button_col:
+
+    if st.button(
+        "Show Recommendations",
+        type="primary",
+        use_container_width=True,
+    ):
+
+        load_recommendations()
+
+
+# ============================================================
+# RECOMMENDATION RESULTS
+# ============================================================
+
+if st.session_state.recommendations:
+
+    recommendations = (
+        st.session_state.recommendations
+    )
+
+    source = (
+        st.session_state.model_source
     )
 
     st.divider()
 
-    # ------------------------------------------------------------------
-    # HOME
-    # ------------------------------------------------------------------
+    # ========================================================
+    # USER + MODEL
+    # ========================================================
 
-    if st.button(
-        "🏠 Home",
-        use_container_width=True
+    user_col, model_col = st.columns(
+        [1, 2]
+    )
+
+    with user_col:
+
+        st.metric(
+            "User",
+            st.session_state.user_id
+        )
+
+    with model_col:
+
+        st.metric(
+            "Recommendation Model",
+            get_model_name(source)
+        )
+
+
+    # ========================================================
+    # MODEL DESCRIPTION
+    # ========================================================
+
+    if source in {
+        "popularity",
+        "popularity_fallback",
+    }:
+
+        st.info(
+            "This user has little or no usable history, "
+            "so ShopSense is using the Popularity model."
+        )
+
+    elif source in {
+        "item_item_cf_sasrec",
+        "cf_sasrec",
+        "sasrec",
+    }:
+
+        st.success(
+            "This user has existing behavioral history, "
+            "so ShopSense is generating personalized recommendations."
+        )
+
+
+    # ========================================================
+    # PRODUCTS
+    # ========================================================
+
+    st.subheader(
+        "Recommended Products"
+    )
+
+    cols = st.columns(5)
+
+    for i, recommendation in enumerate(
+        recommendations[:10]
     ):
-        go_to_home()
+
+        with cols[i % 5]:
+
+            # ------------------------------------------------
+            # ITEM ID
+            # ------------------------------------------------
+
+            item_id = recommendation.get(
+                "retailrocket_item_id"
+            )
+
+            if item_id is None:
+
+                item_id = recommendation.get(
+                    "item_id"
+                )
+
+            if item_id is None:
+
+                item_id = recommendation.get(
+                    "model_item_idx",
+                    "Unknown"
+                )
+
+
+            # ------------------------------------------------
+            # PRODUCT NAME
+            # ------------------------------------------------
+
+            name = recommendation.get(
+                "display_name"
+            )
+
+            name = clean_product_name(
+                name
+            )
+
+            if not name:
+
+                name = (
+                    f"Product {item_id}"
+                )
+
+
+            # ------------------------------------------------
+            # CATEGORY
+            # ------------------------------------------------
+
+            category = recommendation.get(
+                "category_id",
+                "Unknown"
+            )
+
+
+            # ------------------------------------------------
+            # PRODUCT CARD
+            # ------------------------------------------------
+
+            with st.container(
+                border=True
+            ):
+
+                st.markdown(
+                    f"### {name}"
+                )
+
+                st.caption(
+                    f"Item ID: {item_id}"
+                )
+
+                st.caption(
+                    f"Category: {category}"
+                )
+
+
+                # ------------------------------------------------
+                # VIEW
+                # ------------------------------------------------
+
+                if st.button(
+                    "View",
+                    key=(
+                        f"view_"
+                        f"{item_id}_"
+                        f"{i}"
+                    ),
+                    use_container_width=True,
+                ):
+
+                    try:
+
+                        service.log_interaction(
+
+                            user_id=(
+                                st.session_state
+                                .user_id
+                                .strip()
+                            ),
+
+                            session_id=(
+                                st.session_state
+                                .session_id
+                            ),
+
+                            item_id=item_id,
+
+                            event_type="view",
+                        )
+
+                        st.success(
+                            "View recorded."
+                        )
+
+                    except Exception as e:
+
+                        st.error(
+                            "Could not record view."
+                        )
+
+                        st.exception(e)
+
+
+                # ------------------------------------------------
+                # TRANSACTION
+                # ------------------------------------------------
+
+                if st.button(
+                    "🛒 Buy",
+                    key=(
+                        f"buy_"
+                        f"{item_id}_"
+                        f"{i}"
+                    ),
+                    use_container_width=True,
+                ):
+
+                    record_transaction(
+                        item_id
+                    )
+
+
+    # ========================================================
+    # NEW SESSION
+    # ========================================================
 
     st.divider()
 
-    # ------------------------------------------------------------------
-    # ACCOUNT
-    # ------------------------------------------------------------------
-
-    st.subheader("Account")
-
-    if st.session_state.user_id is not None:
-
-        st.success(
-            f"Signed in as **{st.session_state.user_id}**"
-        )
-
-        if st.button(
-            "Sign out",
-            use_container_width=True
-        ):
-            st.session_state.user_id = None
-            st.session_state.session_id = (
-                SessionManager.new_session_id()
-            )
-            st.session_state.cart = []
-            st.session_state.page = "home"
-            st.rerun()
-
-    else:
-
-        st.info("Browsing as guest")
-
-        user_input = st.text_input(
-            "Returning user?",
-            placeholder="Enter User ID"
-        )
-
-        if st.button(
-            "Sign in",
-            use_container_width=True
-        ):
-
-            if user_input.strip():
-
-                st.session_state.user_id = (
-                    user_input.strip()
-                )
-
-                st.session_state.page = "home"
-
-                st.rerun()
-
-    # ------------------------------------------------------------------
-    # SESSION
-    # ------------------------------------------------------------------
-
     if st.button(
-        "Start a new session",
-        use_container_width=True
+        "Start New Session",
+        use_container_width=False,
     ):
 
         st.session_state.session_id = (
             SessionManager.new_session_id()
         )
 
-        st.session_state.cart = []
+        # Keep the same User ID.
+        #
+        # This is important for testing
+        # cross-session personalization.
 
-        st.session_state.selected_item = None
-
-        st.session_state.page = "home"
-
-        # IMPORTANT:
-        # user_id is intentionally NOT cleared.
-        # This allows the same user to return in a new session.
+        load_recommendations()
 
         st.rerun()
 
-    st.divider()
 
-    # ------------------------------------------------------------------
-    # SHOPPING
-    # ------------------------------------------------------------------
+# ============================================================
+# NO RESULTS / INITIAL SCREEN
+# ============================================================
 
-    st.subheader("Shopping")
-
-    categories = safe_call(
-        lambda: catalog.list_categories(),
-        default=[],
-        error_label="Could not load categories"
-    )
-
-    st.session_state.selected_category = st.selectbox(
-        "Category",
-        ["All"] + categories,
-        index=(
-            ["All"] + categories
-        ).index(
-            st.session_state.selected_category
-        )
-        if st.session_state.selected_category
-        in ["All"] + categories
-        else 0
-    )
-
-    st.session_state.search_term = st.text_input(
-        "Search products",
-        value=st.session_state.search_term,
-        placeholder="Search by product name..."
-    )
-
-    st.caption(
-        f"🛒 Cart: {len(st.session_state.cart)} item(s)"
-    )
+else:
 
     st.divider()
 
-    # ------------------------------------------------------------------
-    # PERSONALIZATION
-    # ------------------------------------------------------------------
-
-    st.subheader("Personalization")
-
-    if st.button(
-        "✨ My Recommendations",
-        use_container_width=True
-    ):
-        st.session_state.page = "recommendations"
-        st.rerun()
-
-    if st.button(
-        "📊 My Activity",
-        use_container_width=True
-    ):
-        st.session_state.page = "activity"
-        st.rerun()
-
-    st.divider()
-
-    st.session_state.dev_mode = st.checkbox(
-        "Developer / System Information"
+    st.info(
+        "Enter a User ID and click "
+        "'Show Recommendations'."
     )
 
+    st.markdown(
+        """
+        **How ShopSense works**
 
-# ======================================================================
-# PRODUCT CARD
-# ======================================================================
+        🆕 **New user** → Popularity recommendations
 
-def render_product_card(
-    product,
-    key_prefix
-):
-    item_id = product.get(
-        "retailrocket_item_id"
+        👤 **Existing user** → Item-Item CF + SASRec
+
+        The recommendation model is selected by the
+        existing recommendation backend.
+        """
     )
-
-    display_name = product.get(
-        "display_name",
-        "Product"
-    )
-
-    category_id = product.get(
-        "category_id",
-        "—"
-    )
-
-    available = product.get(
-        "available"
-    )
-
-    with st.container(border=True):
-
-        st.markdown(
-            f"### {display_name}"
-        )
-
-        st.caption(
-            f"Category: {category_id}"
-        )
-
-        if available:
-            st.success(
-                "In stock",
-                icon="✅"
-            )
-        else:
-            st.warning(
-                "Currently unavailable"
-            )
-
-        st.caption(
-            f"Item ID: {item_id}"
-        )
-
-        if st.button(
-            "View Product",
-            key=f"{key_prefix}_view",
-            use_container_width=True
-        ):
-            go_to_product(item_id)
-
-
-# ======================================================================
-# RECOMMENDATION CARD
-# ======================================================================
-
-def render_recommendation_row(
-    items,
-    exclude_id=None
-):
-
-    if exclude_id is not None:
-
-        items = [
-            item
-            for item in items
-            if item.get(
-                "retailrocket_item_id"
-            ) != exclude_id
-        ]
-
-    if not items:
-        st.info(
-            "Nothing to show here yet."
-        )
-        return
-
-    columns = st.columns(
-        min(len(items), 6)
-    )
-
-    for index, item in enumerate(
-        items[:6]
-    ):
-
-        with columns[index]:
-
-            item_id = item.get(
-                "retailrocket_item_id"
-            )
-
-            st.markdown(
-                f"**{item.get('display_name', 'Product')}**"
-            )
-
-            st.caption(
-                f"Item ID: {item_id}"
-            )
-
-            if st.button(
-                "View",
-                key=(
-                    f"recommendation_"
-                    f"{item_id}_"
-                    f"{index}_"
-                    f"{st.session_state.page}"
-                ),
-                use_container_width=True
-            ):
-                go_to_product(item_id)
-
-    if (
-        items
-        and st.session_state.dev_mode
-    ):
-
-        st.caption(
-            "Recommendation source: "
-            f"`{items[0].get('recommendation_source')}`"
-        )
-
-
-# ======================================================================
-# PRODUCT ACTIONS
-# ======================================================================
-
-def render_product_actions(
-    item_id,
-    key_prefix
-):
-
-    col1, col2, col3 = st.columns(3)
-
-    # --------------------------------------------------------------
-    # VIEW
-    # --------------------------------------------------------------
-
-    if col1.button(
-        "View",
-        key=f"{key_prefix}_view",
-        use_container_width=True
-    ):
-        go_to_product(item_id)
-
-    # --------------------------------------------------------------
-    # ADD TO CART
-    # --------------------------------------------------------------
-
-    if col2.button(
-        "Add to Cart",
-        key=f"{key_prefix}_cart",
-        use_container_width=True
-    ):
-
-        st.session_state.cart.append(
-            item_id
-        )
-
-        success = safe_call(
-            lambda: service.log_interaction(
-                item_id=item_id,
-                event_type="add_to_cart",
-                user_id=st.session_state.user_id,
-                session_id=st.session_state.session_id
-            ),
-            default=False,
-            error_label="Could not record cart event"
-        )
-
-        if success is not False:
-            st.success(
-                "Added to cart"
-            )
-
-    # --------------------------------------------------------------
-    # TRANSACTION
-    # --------------------------------------------------------------
-
-    if col3.button(
-        "Buy",
-        key=f"{key_prefix}_buy",
-        use_container_width=True
-    ):
-
-        success = safe_call(
-            lambda: service.log_interaction(
-                item_id=item_id,
-                event_type="transaction",
-                user_id=st.session_state.user_id,
-                session_id=st.session_state.session_id
-            ),
-            default=False,
-            error_label="Could not record purchase"
-        )
-
-        if success is not False:
-            st.success(
-                "Purchase recorded"
-            )
-
-
-# ======================================================================
-# HOME PAGE
-# ======================================================================
-
-def render_home():
-
-    st.title(
-        "Welcome to ShopSense 🛍️"
-    )
-
-    st.write(
-        "Discover products and receive "
-        "recommendations that adapt to your "
-        "shopping behavior."
-    )
-
-    # --------------------------------------------------------------
-    # PERSONALIZED SECTION
-    # --------------------------------------------------------------
-
-    if st.session_state.user_id is not None:
-
-        st.subheader(
-            "Recommended for You"
-        )
-
-        personalized = safe_call(
-            lambda: service.get_recommendations(
-                user_id=st.session_state.user_id,
-                session_id=st.session_state.session_id,
-                N=6
-            ),
-            default=[],
-            error_label="Could not load recommendations"
-        )
-
-        if personalized:
-
-            st.caption(
-                friendly_label(
-                    personalized[0].get(
-                        "recommendation_source"
-                    )
-                )
-            )
-
-            render_recommendation_row(
-                personalized
-            )
-
-        else:
-
-            st.info(
-                "Browse a few products to start "
-                "building your personalized feed."
-            )
-
-    else:
-
-        st.subheader(
-            "Popular Products"
-        )
-
-        popular = safe_call(
-            lambda: service.get_recommendations(
-                user_id=None,
-                session_id=None,
-                N=6
-            ),
-            default=[],
-            error_label="Could not load popular products"
-        )
-
-        render_recommendation_row(
-            popular
-        )
-
-    st.divider()
-
-    # --------------------------------------------------------------
-    # PRODUCT BROWSING
-    # --------------------------------------------------------------
-
-    st.subheader(
-        "Browse Products"
-    )
-
-    category_filter = (
-        None
-        if st.session_state.selected_category == "All"
-        else st.session_state.selected_category
-    )
-
-    search_filter = (
-        st.session_state.search_term
-        if st.session_state.search_term.strip()
-        else None
-    )
-
-    products = safe_call(
-        lambda: catalog.list_products(
-            limit=12,
-            category_id=category_filter,
-            search=search_filter
-        ),
-        default=[],
-        error_label="Could not load products"
-    )
-
-    if not products:
-
-        st.info(
-            "No products match your search."
-        )
-
-    else:
-
-        columns = st.columns(3)
-
-        for index, product in enumerate(
-            products
-        ):
-
-            with columns[index % 3]:
-
-                render_product_card(
-                    product,
-                    key_prefix=(
-                        f"home_"
-                        f"{product.get('retailrocket_item_id')}"
-                    )
-                )
-
-
-# ======================================================================
-# PRODUCT DETAIL PAGE
-# ======================================================================
-
-def render_product():
-
-    item_id = (
-        st.session_state.selected_item
-    )
-
-    if item_id is None:
-
-        st.info(
-            "Select a product to see its details."
-        )
-
-        return
-
-    product = safe_call(
-        lambda: catalog.get_product(
-            item_id
-        ),
-        default=None,
-        error_label="Could not load this product"
-    )
-
-    if product is None:
-
-        st.error(
-            "This product could not be found."
-        )
-
-        return
-
-    if st.button(
-        "← Back to Store"
-    ):
-
-        st.session_state.page = "home"
-        st.rerun()
-
-    st.title(
-        product.get(
-            "display_name",
-            "Product"
-        )
-    )
-
-    st.write(
-        f"**Category:** "
-        f"{product.get('category_id', '—')}"
-    )
-
-    st.write(
-        f"**Availability:** "
-        f"{'In stock' if product.get('available') else 'Unavailable'}"
-    )
-
-    st.caption(
-        f"Item ID: {item_id}"
-    )
-
-    st.divider()
-
-    render_product_actions(
-        item_id,
-        key_prefix=f"detail_{item_id}"
-    )
-
-    st.divider()
-
-    # --------------------------------------------------------------
-    # SIMILAR PRODUCTS
-    # --------------------------------------------------------------
-
-    st.subheader(
-        "Similar Products"
-    )
-
-    similar = safe_call(
-        lambda: service.get_similar_products(
-            item_id,
-            N=6
-        ),
-        default=[],
-        error_label="Could not load similar products"
-    )
-
-    render_recommendation_row(
-        similar,
-        exclude_id=item_id
-    )
-
-
-# ======================================================================
-# RECOMMENDATIONS PAGE
-# ======================================================================
-
-def render_recommendations():
-
-    st.title(
-        "Recommended for You ✨"
-    )
-
-    if st.session_state.user_id is None:
-
-        st.info(
-            "Sign in as a returning user to "
-            "see personalized recommendations."
-        )
-
-        return
-
-    results = safe_call(
-        lambda: service.get_recommendations(
-            user_id=st.session_state.user_id,
-            session_id=st.session_state.session_id,
-            N=10
-        ),
-        default=[],
-        error_label="Could not load your recommendations"
-    )
-
-    if not results:
-
-        st.info(
-            "Browse a few products and we'll "
-            "start personalizing your recommendations."
-        )
-
-        return
-
-    source = results[0].get(
-        "recommendation_source"
-    )
-
-    st.caption(
-        friendly_label(source)
-    )
-
-    render_recommendation_row(
-        results
-    )
-
-
-# ======================================================================
-# ACTIVITY PAGE
-# ======================================================================
-
-def render_activity():
-
-    st.title(
-        "Your Activity 📊"
-    )
-
-    if st.session_state.user_id is None:
-
-        st.info(
-            "Sign in to view your activity."
-        )
-
-        return
-
-    events = safe_call(
-        lambda: service.get_user_events(
-            user_id=st.session_state.user_id,
-            session_id=st.session_state.session_id,
-            limit=50
-        ),
-        default=[],
-        error_label="Could not load your activity"
-    )
-
-    if not events:
-
-        st.info(
-            "No activity recorded yet. "
-            "Start browsing to build your profile."
-        )
-
-        return
-
-    views = sum(
-        1
-        for event in events
-        if event.get("event_type") == "view"
-    )
-
-    carts = sum(
-        1
-        for event in events
-        if event.get("event_type") == "add_to_cart"
-    )
-
-    purchases = sum(
-        1
-        for event in events
-        if event.get("event_type") == "transaction"
-    )
-
-    col1, col2, col3 = st.columns(3)
-
-    col1.metric(
-        "Views",
-        views
-    )
-
-    col2.metric(
-        "Add to Cart",
-        carts
-    )
-
-    col3.metric(
-        "Purchases",
-        purchases
-    )
-
-    st.divider()
-
-    st.subheader(
-        "Personalization"
-    )
-
-    total_events = (
-        views
-        + carts
-        + purchases
-    )
-
-    min_history = getattr(
-        service,
-        "min_session_history",
-        0
-    )
-
-    if total_events < min_history:
-
-        status = "New visitor"
-
-    elif total_events < 5:
-
-        status = "Building your profile"
-
-    else:
-
-        status = "Personalized"
-
-    st.write(
-        f"**Personalization status:** {status}"
-    )
-
-    st.divider()
-
-    st.subheader(
-        "Recommended Based on Your Activity"
-    )
-
-    recommendations = safe_call(
-        lambda: service.get_recommendations(
-            user_id=st.session_state.user_id,
-            session_id=st.session_state.session_id,
-            N=6
-        ),
-        default=[],
-        error_label="Could not load recommendations"
-    )
-
-    render_recommendation_row(
-        recommendations
-    )
-
-
-# ======================================================================
-# PAGE ROUTER
-# ======================================================================
-
-PAGES = {
-    "home": render_home,
-    "product": render_product,
-    "recommendations": render_recommendations,
-    "activity": render_activity,
-}
-
-current_page = st.session_state.page
-
-PAGES.get(
-    current_page,
-    render_home
-)()
-
-
-# ======================================================================
-# DEVELOPER / SYSTEM INFORMATION
-# ======================================================================
-
-if st.session_state.dev_mode:
-
-    with st.expander(
-        "Developer / System Information",
-        expanded=True
-    ):
-
-        st.write(
-            "Session ID:",
-            st.session_state.session_id
-        )
-
-        st.write(
-            "User ID:",
-            st.session_state.user_id
-            or "(guest)"
-        )
-
-        history = safe_call(
-            lambda: service.get_user_events(
-                user_id=st.session_state.user_id,
-                session_id=st.session_state.session_id
-            ),
-            default=[],
-            error_label="Could not load history"
-        )
-
-        st.write(
-            "Current-session interactions:",
-            len(history)
-        )
-
-        st.write(
-            "Minimum history for personalization:",
-            getattr(
-                service,
-                "min_session_history",
-                "Not exposed"
-            )
-        )
