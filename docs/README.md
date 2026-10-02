@@ -1,171 +1,1240 @@
-# ShopSense — Collaborative Filtering Recommendation Engine
+# ShopSense — E-Commerce Recommendation System
 
-An item-based collaborative filtering recommender built on the RetailRocket
-e-commerce dataset (2.76M events, ~1.1M users, ~210K items), with a
-leakage-free chronological evaluation and a saved, reloadable production
-model.
+An end-to-end e-commerce recommendation system built on the **RetailRocket dataset**, combining **Item-Item Collaborative Filtering, SASRec sequential reranking, popularity-based fallback recommendations, persistent user history, MLflow model management, and a Streamlit storefront**.
 
-## What it does
+ShopSense is designed not only as a recommendation model, but as a complete machine-learning application that covers the path from raw interaction data to model training, evaluation, prediction, persistence, and user-facing recommendations.
 
-Given a visitor ID, recommends the top-N products they're most likely to
-interact with next, based on item-item collaborative filtering:
+---
 
-```
-recommend(172, N=10)
-→ Visitor: 172
-  1. Item 119736  (score=8.42, source=item_item_cf)
-  2. Item 213834  (score=6.10, source=item_item_cf)
-  ...
-```
+## What Problem Does ShopSense Solve?
 
-Falls back to a popularity-ranked list for cold-start visitors with no
-prior history.
+An e-commerce recommendation system cannot treat every visitor the same way.
 
-## Problems I ran into, and how I solved them
+Consider three users:
 
-This project went through several real debugging rounds. Documenting them
-here rather than hiding them, since diagnosing and fixing each one is most
-of the actual engineering work.
+* A **new visitor** with no interaction history
+* A **returning user** who has interacted with only a few products
+* A **returning user** with enough historical activity to personalize recommendations
 
-### 1. Data leakage in the train/test split (~98% leakage rate)
+ShopSense handles these cases differently:
 
-**Symptom:** a check comparing test targets against training history showed
-98.25% of test items already appeared in that user's "training" data —
-suspiciously high, and Item-Item Recall@50 jumped from ~1% to ~39% between
-K=20 and K=50, which is not a normal recall curve shape.
-
-**Root cause:** the train/test split excluded only the exact
-`(visitorid, itemid, timestamp)` row matching each held-out transaction.
-Every *other* event for that user — including events that happened
-*after* the held-out transaction — stayed in the training set. The model
-was training on the future.
-
-**Fix:** switched to a per-user cutoff timestamp. For each user, the cutoff
-is the timestamp of their last transaction; training data for that user is
-everything strictly before the cutoff, full stop. Added an assertion
-(`train_events['timestamp'] < cutoff` for every test user) that fails
-immediately if this is ever broken again, instead of surfacing as a
-suspicious number three cells later.
-
-One thing this was *not*: a user viewing an item before buying it (e.g.
-visitor 172 viewing item 10034, then buying it) is not leakage — that's the
-real browsing-before-buying signal, and it happens before the cutoff. The
-task is "predict what they'll interact with next," and prior views of the
-eventual purchase are exactly the kind of signal that should be in
-training.
-
-### 2. ALS `KeyError` from inconsistent matrix orientation
-
-**Symptom:** `KeyError: 223332` when converting recommended indices back to
-item IDs — the model was returning indices that didn't exist in the item
-mapping.
-
-**Root cause:** `implicit`'s `AlternatingLeastSquares.fit()` orientation
-convention (whether it expects a user×item or item×user matrix) isn't
-consistent across library versions, and I'd flip-flopped between the two
-across different cells without re-verifying, so the fitted factors didn't
-line up with the ID mappings anymore.
-
-**Fix:** instead of hardcoding an orientation and hoping, the final version
-fits both orientations and only accepts whichever one produces
-`user_factors.shape[0] == n_users` and `item_factors.shape[0] == n_items`.
-If neither orientation is correct, it raises immediately with a clear error
-rather than silently producing misaligned indices.
-
-### 3. `ValueError: Buffer dtype mismatch, expected 'double' but got 'float'`
-
-**Symptom:** `ItemItemRecommender.fit()` crashed inside `implicit`'s Cython
-backend (`all_pairs_knn`).
-
-**Root cause:** the interaction matrix was built with `dtype=np.float32`.
-`implicit`'s `ItemItemRecommender` backend requires `float64` ("double")
-specifically — `AlternatingLeastSquares` is more lenient about dtype, which
-is why only the item-item model broke.
-
-**Fix:** built `user_item_matrix` as `float64` from the start (Step 5 of
-the notebook), so every downstream consumer — ALS, item-item fit, item-item
-`.recommend()`, and the final production `recommend()` function — sees one
-consistent, correct dtype. Added `assert user_item_matrix.dtype ==
-np.float64` right after construction so this fails loudly at the source
-instead of three steps later inside a library's Cython internals.
-
-### 4. Choosing the right model for this dataset
-
-Ran all four candidates through the same leakage-free evaluation
-(Popularity, Transaction Popularity, User-User CF, Item-Item CF, ALS) with
-identical Recall@5/10/20/50/100 metrics, rather than assuming an answer.
-
-- **User-user CF performed worst.** ~80% of users have exactly one
-  interaction, so cosine similarity between users is statistically
-  unreliable — there's no real basis for "similar" at that sparsity.
-- **ALS underperformed even the popularity baseline**, consistent with the
-  same sparsity problem: too little signal per user for the latent factors
-  to learn meaningful structure without further work (confidence weighting,
-  much more tuning).
-- **Item-item CF performed best**, because item vectors aggregate signal
-  across many users even when individual users are near-cold-start —
-  the item side of the matrix is simply denser than the user side here.
-
-**Decision:** item-item collaborative filtering is the production model.
-ALS and user-user CF are kept in the notebook as documented, honest
-comparisons — not swept under the rug, but not shipped either.
-
-## Architecture
-
-```
-RetailRocket data
-      ↓
-Chronological, leakage-free train/test split (per-user cutoff)
-      ↓
-Weighted interactions (view=1, addtocart=3, transaction=5)
-      ↓
-Item-item collaborative filtering (implicit.ItemItemRecommender, K=50)
-      ↓
-recommend(visitor_id, N) — same function used for evaluation and production
-      ↓
-Saved model artifacts (models/) — for FastAPI serving
+```text
+                         ┌─────────────────────┐
+                         │      User ID        │
+                         └──────────┬──────────┘
+                                    │
+                                    ▼
+                         ┌─────────────────────┐
+                         │ Persistent History  │
+                         │    in SQLite        │
+                         └──────────┬──────────┘
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+              No / little history             Usable history
+                    │                               │
+                    ▼                               ▼
+              Popularity                 Item-Item CF Candidates
+              Fallback                           │
+                                                 ▼
+                                          SASRec Reranking
+                                                 │
+                                                 ▼
+                                      Personalized Top-N
 ```
 
-## Model artifacts
+The system therefore provides a graceful recommendation strategy rather than forcing one model to handle every user.
 
-Running the notebook's save step writes four files to `../models/`:
+---
 
-| File | Contents | Format |
-|---|---|---|
-| `item_model.pkl` | Fitted `ItemItemRecommender` (similarity matrix) | pickle |
-| `user_item_matrix.npz` | Sparse interaction matrix, needed at inference time | scipy `.npz` |
-| `mappings.pkl` | `user_to_idx`, `item_to_idx`, `idx_to_user`, `idx_to_item` | pickle |
-| `popular_item_ids.pkl` | Popularity-ranked fallback for cold-start visitors | pickle |
+# Recommendation Flow
 
-To load and serve (e.g. from a FastAPI startup hook):
+## 1. New or Unknown User
 
-```python
-import pickle
-from scipy.sparse import load_npz
+A user without sufficient historical interactions cannot be reliably personalized.
 
-item_model = pickle.load(open('models/item_model.pkl', 'rb'))
-user_item_matrix = load_npz('models/user_item_matrix.npz')
-mappings = pickle.load(open('models/mappings.pkl', 'rb'))
-popular_item_ids = pickle.load(open('models/popular_item_ids.pkl', 'rb'))
+ShopSense uses a popularity-based recommender:
+
+```text
+New User
+   ↓
+No usable history
+   ↓
+Popularity Model
+   ↓
+Top-N Products
 ```
 
-The notebook's Step 16 reloads these exact files and asserts the output
-matches the in-memory model exactly before considering the save step
-successful — a file existing on disk doesn't prove it's usable; matching
-output does.
+This provides a practical cold-start fallback.
 
-## Honest scope
+---
 
-**Built:** item-based collaborative filtering, evaluated against
-popularity, transaction-popularity, user-user CF, and ALS baselines on a
-leakage-free chronological split.
+## 2. Returning User With Insufficient History
 
-**Not built yet (planned next):** content-based NLP (BERT embeddings for
-cold-start), sequential deep learning (SASRec, for session-aware
-recommendations), RAG-based natural language product search, and GenAI
-personalized copy. These are real next-phase work, not implemented here.
+A returning user may exist in the system but still have too little history for sequential modeling.
 
-## Data
+Instead of producing unstable personalized recommendations, ShopSense falls back to popularity:
 
-[RetailRocket e-commerce dataset](https://www.kaggle.com/datasets/retailrocket/ecommerce-dataset)
-via Kaggle — `events.csv`, `item_properties.csv`, `category_tree.csv`.
+```text
+Returning User
+      ↓
+Insufficient History
+      ↓
+Popularity Fallback
+      ↓
+Top-N Products
+```
+
+---
+
+## 3. Returning User With Usable History
+
+For users with enough interaction history:
+
+```text
+User History
+     ↓
+Item-Item Collaborative Filtering
+     ↓
+Candidate Pool
+     ↓
+SASRec Sequential Reranking
+     ↓
+Top-N Recommendations
+```
+
+Item-Item CF generates a relatively small candidate set, while SASRec uses the user's recent sequence to determine which candidates are more relevant.
+
+This avoids requiring SASRec to score the entire product catalog.
+
+---
+
+# Key Features
+
+* Item-Item Collaborative Filtering
+* SASRec sequential recommendation model
+* Popularity-based cold-start fallback
+* Persistent user interaction history
+* Cross-session personalization
+* Product catalog integration
+* MLflow experiment tracking and model registration
+* Streamlit e-commerce storefront
+* Leakage-free chronological evaluation
+* Recall@K evaluation
+* Coverage, diversity, and novelty evaluation
+* Automated recommendation-system tests
+* Graceful fallback when personalization is unavailable
+
+---
+
+# Architecture
+
+```text
+                         ┌──────────────────────┐
+                         │   RetailRocket Data  │
+                         └───────────┬──────────┘
+                                     │
+                                     ▼
+                         ┌──────────────────────┐
+                         │   Data Ingestion     │
+                         └───────────┬──────────┘
+                                     │
+                                     ▼
+                         ┌──────────────────────┐
+                         │ Feature Engineering │
+                         └───────────┬──────────┘
+                                     │
+                  ┌──────────────────┼──────────────────┐
+                  │                  │                  │
+                  ▼                  ▼                  ▼
+          ┌──────────────┐   ┌──────────────┐   ┌──────────────┐
+          │ Popularity   │   │ Item-Item CF │   │   SASRec     │
+          │    Model     │   │    Model     │   │    Model     │
+          └──────┬───────┘   └──────┬───────┘   └──────┬───────┘
+                 │                  │                  │
+                 │                  └────────┬─────────┘
+                 │                           │
+                 │                           ▼
+                 │                  ┌──────────────────┐
+                 │                  │ Prediction /     │
+                 │                  │ Recommendation   │
+                 │                  │ Pipeline         │
+                 │                  └────────┬─────────┘
+                 │                           │
+                 └──────────────┬────────────┘
+                                │
+                                ▼
+                       ┌──────────────────┐
+                       │ Recommendation   │
+                       │    Service       │
+                       └────────┬─────────┘
+                                │
+                    ┌───────────┴───────────┐
+                    │                       │
+                    ▼                       ▼
+             ┌──────────────┐       ┌──────────────┐
+             │ Event Store  │       │  Streamlit   │
+             │   SQLite     │       │  Storefront  │
+             └──────────────┘       └──────────────┘
+```
+
+---
+
+# Model Strategy
+
+## Popularity Model
+
+Popularity is used for:
+
+* New users
+* Unknown users
+* Users with insufficient history
+* Cases where personalized recommendation generation cannot be performed
+
+The popularity model provides a reliable fallback instead of returning an empty recommendation list.
+
+---
+
+## Item-Item Collaborative Filtering
+
+Item-Item CF is the primary candidate-generation model.
+
+The basic idea is:
+
+```text
+User interacted with:
+    Item A
+    Item B
+    Item C
+
+Find items similar to:
+    A + B + C
+
+Generate candidate pool
+        ↓
+Pass candidates to SASRec
+```
+
+The model works on user-item interaction data and generates a candidate pool before sequential reranking.
+
+The production recommendation pipeline uses approximately **200 candidates** before SASRec reranking.
+
+---
+
+## SASRec
+
+SASRec is used as a **sequential reranking model**.
+
+Rather than generating recommendations across the entire catalog, it receives candidate products from Item-Item CF and scores them according to the user's recent interaction sequence.
+
+### Configuration
+
+* Maximum sequence length: **50**
+* Batch size: **128**
+* Learning rate: **1e-3**
+* Objective: **binary classification / BCE-style training**
+* Negative sampling: random negatives excluding observed sequence items
+* Causal attention masking
+* GPU used when available
+* CPU fallback when GPU is unavailable
+
+Conceptually:
+
+```text
+User sequence
+
+[Item 12, Item 45, Item 81, Item 103, ...]
+
+                    ↓
+
+                 SASRec
+
+                    ↓
+
+Candidate scores
+
+Item 201 → 0.82
+Item 304 → 0.71
+Item 156 → 0.65
+...
+```
+
+The highest-scoring candidates are returned to the application.
+
+---
+
+# Why Item-Item CF + SASRec?
+
+The models serve different purposes.
+
+| Component             | Responsibility                                        |
+| --------------------- | ----------------------------------------------------- |
+| Popularity            | Cold-start and fallback recommendations               |
+| Item-Item CF          | Generate relevant candidate products                  |
+| SASRec                | Understand recent user sequence and rerank candidates |
+| EventStore            | Persist interaction history                           |
+| RecommendationService | Coordinate recommendation logic                       |
+| Streamlit             | User-facing application                               |
+
+This separation keeps candidate generation, ranking, persistence, and presentation independent.
+
+---
+
+# Persistent User History
+
+One of the important features of ShopSense is that user history is **not dependent on Streamlit's in-memory session state**.
+
+Interaction history is stored in a SQLite EventStore.
+
+```text
+User
+ │
+ ├── Session 1
+ │      ├── view Item A
+ │      ├── view Item B
+ │      └── transaction Item C
+ │
+ └── Session 2
+        │
+        └── Previous history available
+                ↓
+        Personalized recommendations
+```
+
+This allows a user to start a new application/browser session while retaining their previous interaction history.
+
+---
+
+# Cross-Session Personalization
+
+ShopSense explicitly tests whether historical interactions are reused across sessions.
+
+Example:
+
+```text
+Session 1
+─────────
+
+User: 123
+
+View:
+    Product A
+    Product B
+    Product C
+
+        ↓
+
+Events stored in SQLite
+```
+
+Then:
+
+```text
+Session 2
+─────────
+
+User: 123
+
+New session
+    ↓
+Load persistent history
+    ↓
+Use previous interactions
+    ↓
+Generate personalized recommendations
+```
+
+The recommendation system therefore separates:
+
+* **application session state**
+* **persistent user interaction history**
+
+This is important for a realistic e-commerce recommendation workflow.
+
+---
+
+# Interaction Tracking
+
+The application records user interactions in the EventStore.
+
+Current application-level interactions include:
+
+| Interaction | Weight |
+| ----------- | -----: |
+| View        |      1 |
+| Add to Cart |      3 |
+| Transaction |      5 |
+
+Higher-value interactions receive greater importance when constructing the interaction representation.
+
+The transaction signal is therefore stronger than a simple product view.
+
+---
+
+# Product Catalog
+
+Recommendation models operate using item identifiers, but a storefront needs product information that users can understand.
+
+ShopSense includes a `CatalogBuilder` that connects model item IDs with product metadata.
+
+The catalog contains:
+
+* Product/item ID
+* Category information
+* Availability information where present
+* Display name
+* Synthetic metadata indicator
+
+The generated catalog currently contains approximately **234,561 product rows**.
+
+Some RetailRocket products do not have complete metadata. For those products, ShopSense generates placeholder display names.
+
+These generated names are explicitly marked as:
+
+```text
+is_synthetic = True
+```
+
+They are therefore not presented as original RetailRocket product names.
+
+---
+
+# Evaluation
+
+Recommendation systems should not be evaluated using accuracy alone.
+
+ShopSense evaluates the recommendation pipeline using:
+
+* Recall@K
+* Coverage@K
+* Diversity@K
+* Novelty@K
+
+---
+
+## Leakage-Free Evaluation
+
+The original evaluation process exposed an important problem.
+
+A naive split can accidentally allow future interactions from a user to remain inside the training data.
+
+For a chronological recommendation task, this creates temporal leakage.
+
+The corrected evaluation uses a **per-user chronological cutoff**:
+
+```text
+User timeline
+
+t1 ── t2 ── t3 ── t4 ── t5
+
+Training:
+t1 ── t2 ── t3
+
+Evaluation:
+          t4 ── t5
+```
+
+The pipeline verifies that training events occur before the evaluation cutoff.
+
+This makes the evaluation much closer to the actual recommendation scenario.
+
+---
+
+# Evaluation Results
+
+The Item-Item CF model achieved approximately:
+
+| Metric     | Recall |
+| ---------- | -----: |
+| Recall@5   |  0.850 |
+| Recall@10  |  0.891 |
+| Recall@20  |  0.918 |
+| Recall@50  |  0.942 |
+| Recall@100 |  0.975 |
+
+These results should be interpreted in the context of the RetailRocket interaction distribution and the evaluation protocol.
+
+---
+
+# The Repeat-Interaction Baseline
+
+During evaluation, a simple baseline produced surprisingly high recall.
+
+The baseline recommends items from a user's previous interaction history.
+
+Approximate results:
+
+| Metric    | Repeat-History Recall |
+| --------- | --------------------: |
+| Recall@5  |                 0.962 |
+| Recall@10 |                 0.975 |
+| Recall@20 |                 0.980 |
+
+This revealed an important characteristic of the dataset:
+
+> Many evaluation targets are repeat interactions.
+
+Therefore, a high Recall@K value does not automatically mean that a recommendation model is discovering new products.
+
+ShopSense consequently distinguishes between:
+
+### Repeat recommendation
+
+```text
+User previously interacted with Product A
+                 ↓
+Recommend Product A again
+```
+
+and:
+
+### Discovery recommendation
+
+```text
+User previously interacted with Product A
+                 ↓
+Recommend a new, relevant Product B
+```
+
+This distinction is important when interpreting recommendation-system performance.
+
+---
+
+# Discovery Evaluation
+
+ShopSense also supports evaluation where previously seen items are excluded from recommendation results.
+
+This provides a separate view of the model's ability to recommend products that are new to the user.
+
+The project therefore avoids relying on a single metric to describe recommendation quality.
+
+---
+
+# Other Models Investigated
+
+Several approaches were explored during development.
+
+| Model                  | Purpose                            |
+| ---------------------- | ---------------------------------- |
+| Popularity             | Baseline / cold-start              |
+| Transaction Popularity | Stronger purchase-based baseline   |
+| User-User CF           | Collaborative filtering experiment |
+| Item-Item CF           | Candidate generation               |
+| ALS                    | Matrix-factorization experiment    |
+| SASRec                 | Sequential reranking               |
+
+Item-Item CF was selected as the candidate-generation component, while SASRec was integrated as the sequential reranker.
+
+ALS and User-User CF remain useful experimental comparisons rather than the final production recommendation path.
+
+---
+
+# Important Engineering Problems Solved
+
+Building ShopSense involved several problems that affected the correctness of the system.
+
+## 1. Data Leakage
+
+### Problem
+
+A simple train/test split allowed future interactions from the same user to remain in training.
+
+### Solution
+
+Implemented chronological per-user splitting with cutoff validation.
+
+```text
+User events
+     ↓
+Chronological ordering
+     ↓
+Per-user cutoff
+     ↓
+Train < cutoff < Evaluation
+```
+
+---
+
+## 2. ALS Mapping / KeyError
+
+The ALS experiment exposed inconsistencies between user/item mappings and matrix orientation.
+
+The issue was addressed by explicitly validating:
+
+* user dimensions
+* item dimensions
+* mapping consistency
+* factor matrix dimensions
+
+This prevented silent ID-to-factor mismatches.
+
+---
+
+## 3. Sparse Matrix Dtype Mismatch
+
+The Item-Item CF backend produced:
+
+```text
+Buffer dtype mismatch,
+expected 'double' but got 'float'
+```
+
+The interaction matrix was corrected to the expected `float64` representation and validated before model training.
+
+---
+
+## 4. `filter_already_liked_items` Padding
+
+Evaluation initially showed unexpected item IDs because recommendation arrays can contain zero-score padding after filtering.
+
+This highlighted an important distinction between:
+
+```text
+Recommendation output size
+```
+
+and:
+
+```text
+Number of valid recommendation candidates
+```
+
+The evaluation protocol was adjusted appropriately for the next-interaction task rather than blindly filtering seen items.
+
+---
+
+## 5. Trivial Baseline Discovery
+
+The repeat-history baseline produced very strong recall.
+
+Instead of treating this as proof that the model was excellent, the result was investigated and used to understand the dataset.
+
+This changed the evaluation philosophy from:
+
+```text
+"High Recall = Good recommender"
+```
+
+to:
+
+```text
+"Recall + repeat behavior + discovery + diversity
+= better understanding of recommendation quality"
+```
+
+---
+
+## 6. SASRec Design
+
+The SASRec implementation required careful handling of:
+
+* causal masking
+* sequence padding
+* maximum sequence length
+* negative sampling
+* observed-item exclusion
+* GPU/CPU execution
+* insufficient user history
+
+The model is therefore integrated with fallback behavior rather than assumed to work for every user.
+
+---
+
+# MLflow
+
+ShopSense uses **MLflow** for experiment tracking and model management.
+
+Current setup:
+
+```text
+MLflow
+│
+├── Experiment
+│     └── shopsense-production
+│
+├── Parameters
+│
+├── Metrics
+│
+└── Registered Models
+      └── shopsense-item-item-cf
+```
+
+The project uses an SQLite MLflow backend:
+
+```text
+sqlite:///mlflow.db
+```
+
+Model artifacts and experiment information can therefore be tracked separately from the application code.
+
+This makes the recommendation pipeline easier to reproduce and manage than simply keeping an untracked `.pkl` file.
+
+---
+
+# Prediction Pipeline
+
+The prediction layer loads the trained artifacts and connects them to the recommendation service.
+
+Conceptually:
+
+```text
+                     PredictionPipeline
+                            │
+        ┌───────────────────┼───────────────────┐
+        │                   │                   │
+        ▼                   ▼                   ▼
+ Item-Item CF           SASRec             Popularity
+        │                   │                   │
+        └──────────────┬────┴───────────────────┘
+                       │
+                       ▼
+                 Recommendation
+                    Service
+                       │
+                       ▼
+                   Top-N Items
+```
+
+The pipeline also loads the product catalog so that model item IDs can be converted into storefront-ready product information.
+
+---
+
+# Recommendation Service
+
+`RecommendationService` acts as the application-level coordinator.
+
+Its responsibilities include:
+
+* Accepting a user ID
+* Loading persistent history
+* Determining whether personalization is possible
+* Selecting the appropriate recommendation strategy
+* Generating recommendations
+* Recording interactions
+* Connecting the prediction pipeline with the EventStore
+
+The application therefore does not need to know the internal details of Item-Item CF, SASRec, or popularity modeling.
+
+---
+
+# Recommendation Decision Logic
+
+The application follows this general decision process:
+
+```text
+                 Request Recommendations
+                          │
+                          ▼
+                 Is user known?
+                    /       \
+                  No         Yes
+                  │           │
+                  ▼           ▼
+             Popularity   Load History
+                              │
+                              ▼
+                    Enough history?
+                       /       \
+                     No         Yes
+                     │           │
+                     ▼           ▼
+                Popularity   Item-Item CF
+                              │
+                              ▼
+                         Candidate Pool
+                              │
+                              ▼
+                           SASRec
+                              │
+                              ▼
+                      Personalized Top-N
+```
+
+This design makes the fallback behavior explicit and testable.
+
+---
+
+# Streamlit Storefront
+
+ShopSense includes a Streamlit application that exposes the recommendation pipeline through a simple e-commerce interface.
+
+The storefront allows a user to:
+
+* Enter a user ID
+* Request recommendations
+* View recommended products
+* View recommendation source
+* Interact with products
+* Record transactions
+* Start a new application session
+* Continue using persistent history
+
+The UI also makes the recommendation strategy visible.
+
+Examples:
+
+```text
+🔥 Popularity
+```
+
+for fallback recommendations and:
+
+```text
+🧠 Item-Item CF + SASRec
+```
+
+for personalized recommendations.
+
+This makes it easier to understand what the system is doing during development and demonstration.
+
+---
+
+# Testing
+
+ShopSense includes automated tests for the recommendation system.
+
+The test suite covers scenarios including:
+
+### Anonymous / Unknown User
+
+```text
+Unknown User
+     ↓
+Popularity
+     ↓
+5+ recommendations
+```
+
+### Low-History User
+
+```text
+Known User
+     ↓
+Insufficient history
+     ↓
+Popularity fallback
+```
+
+### Known User Personalization
+
+```text
+Known User
+     ↓
+Stored history
+     ↓
+Item-Item CF + SASRec
+```
+
+### Cross-Session Personalization
+
+```text
+Session 1
+   ↓
+User interacts with products
+   ↓
+History persisted
+
+Session 2
+   ↓
+Same User ID
+   ↓
+Previous history recovered
+   ↓
+Personalized recommendations
+```
+
+Run the recommendation-system tests with:
+
+```bash
+python -m tests.test_recommendation_system
+```
+
+---
+
+# Project Structure
+
+```text
+ShopSense/
+│
+├── app.py
+│
+├── datasets/
+│   └── RetailRocket data
+│
+├── docs/
+│   ├── Evaluation_Improvements_Log.md
+│   └── SASRec_Implementation_Notes.md
+│
+├── notebooks/
+│
+├── src/
+│   │
+│   ├── components/
+│   │   ├── data_ingestion.py
+│   │   ├── feature_engineering.py
+│   │   ├── model_trainer.py
+│   │   └── catalog_builder.py
+│   │
+│   ├── configuration/
+│   │
+│   ├── database/
+│   │   ├── event_store.py
+│   │   └── services/
+│   │       ├── recommendation_service.py
+│   │       └── session_manager.py
+│   │
+│   ├── pipeline/
+│   │   ├── training_pipeline.py
+│   │   ├── prediction_pipeline.py
+│   │   └── recommendation_pipeline.py
+│   │
+│   ├── model/
+│   │
+│   ├── logger/
+│   │
+│   ├── exception/
+│   │
+│   └── utils/
+│
+├── tests/
+│   └── test_recommendation_system.py
+│
+├── product_catalog.parquet
+├── requirements.txt
+├── .gitignore
+└── README.md
+```
+
+> The exact source-file names may vary as the project evolves; the structure above describes the major application components and their responsibilities.
+
+---
+
+# Technology Stack
+
+### Programming
+
+* Python
+
+### Data Processing
+
+* Pandas
+* NumPy
+* SciPy
+* PyArrow
+
+### Machine Learning
+
+* Scikit-learn
+* Implicit
+* Joblib
+
+### Deep Learning
+
+* PyTorch
+
+### Recommendation
+
+* Item-Item Collaborative Filtering
+* SASRec
+* Popularity-based recommendation
+
+### Experiment Tracking
+
+* MLflow
+
+### Application
+
+* Streamlit
+
+### Storage
+
+* SQLite
+* Parquet
+
+### Configuration
+
+* YAML
+* Pydantic
+* Python environment variables
+
+---
+
+# Dataset
+
+ShopSense uses the **RetailRocket recommender-system dataset**.
+
+The dataset contains:
+
+* User events
+* Item interactions
+* Item properties
+* Category information
+
+The project works with event types such as:
+
+```text
+view
+addtocart
+transaction
+```
+
+The dataset is interaction-heavy and strongly repeat-oriented, which is why the evaluation includes both repeat-history and discovery-oriented analysis.
+
+> Dataset statistics can differ depending on preprocessing, filtering, train/test construction, and catalog-building stages. The production catalog generated by the current pipeline contains approximately 234,561 item rows.
+
+---
+
+# Local Setup
+
+## 1. Clone the repository
+
+```bash
+git clone <your-repository-url>
+cd ShopSense
+```
+
+---
+
+## 2. Create a virtual environment
+
+### Windows
+
+```powershell
+python -m venv shope_sense
+```
+
+Activate it:
+
+```powershell
+.\shope_sense\Scripts\Activate.ps1
+```
+
+---
+
+## 3. Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+---
+
+## 4. Run the recommendation tests
+
+```bash
+python -m tests.test_recommendation_system
+```
+
+---
+
+## 5. Start the Streamlit application
+
+```bash
+streamlit run app.py
+```
+
+The application will open in the browser.
+
+---
+
+# Example Application Flow
+
+### New User
+
+```text
+User ID: new_user_123
+
+No usable history detected.
+
+Recommendation Source:
+🔥 Popularity
+```
+
+### Returning User
+
+```text
+User ID: existing_user_456
+
+Persistent interaction history found.
+
+Recommendation Source:
+🧠 Item-Item CF + SASRec
+```
+
+### Interaction
+
+```text
+User
+ ↓
+Views product
+ ↓
+Event stored in SQLite
+ ↓
+Recommendation request
+ ↓
+Updated user history
+ ↓
+New recommendation list
+```
+
+---
+
+# Reproducibility
+
+The project separates:
+
+```text
+Data
+   ↓
+Feature Engineering
+   ↓
+Training
+   ↓
+Model Artifacts
+   ↓
+Prediction
+   ↓
+Recommendation Service
+   ↓
+Application
+```
+
+This makes it possible to work on individual stages without coupling the entire system together.
+
+MLflow is used to track trained models and experiments, while the prediction layer loads the required artifacts for inference.
+
+---
+
+# Honest Scope
+
+ShopSense is a **portfolio and learning project**, not a production-scale commercial recommendation platform.
+
+The project demonstrates:
+
+* Recommendation-system fundamentals
+* Collaborative filtering
+* Sequential recommendation
+* Cold-start handling
+* Persistent personalization
+* Model evaluation
+* MLflow
+* Application architecture
+* Streamlit
+* Automated testing
+
+It does **not** currently claim:
+
+* Real-time distributed recommendation serving
+* Production-scale cloud deployment
+* Online model retraining
+* A/B testing with real customers
+* Industrial-scale feature stores
+* Guaranteed business conversion improvement
+
+The evaluation results are specific to the RetailRocket dataset and the implemented evaluation protocol.
+
+---
+
+# What I Learned
+
+Building ShopSense went beyond training a recommendation model.
+
+The project exposed several practical lessons:
+
+### 1. Evaluation can be misleading
+
+A high Recall@K score is not enough to conclude that a recommender is useful.
+
+Understanding the target distribution is equally important.
+
+### 2. Data leakage can invalidate recommendation experiments
+
+Recommendation systems are temporal by nature, so train/test construction must respect time.
+
+### 3. Baselines matter
+
+A simple repeat-history strategy revealed that the dataset contains a large amount of repeat behavior.
+
+### 4. Different models solve different problems
+
+Popularity, collaborative filtering, and sequential models should not necessarily compete for the same responsibility.
+
+### 5. A model is only one part of a recommendation system
+
+A usable recommender also requires:
+
+```text
+Data
++
+Models
++
+Evaluation
++
+Persistence
++
+Prediction Pipeline
++
+Business/Application Logic
++
+User Interface
+```
+
+---
+
+# Future Improvements
+
+Potential next steps include:
+
+* Better discovery-oriented evaluation
+* More sophisticated candidate generation
+* Transformer-based ranking improvements
+* Real-time event ingestion
+* Online model updates
+* Feature store integration
+* FastAPI recommendation API
+* Dockerized deployment
+* Cloud deployment
+* Recommendation monitoring
+* A/B testing
+* Vector-based product similarity
+* Retrieval-Augmented Generation for product explanations
+* LLM-powered recommendation explanations
+
+---
+
+# Project Goal
+
+The goal of ShopSense is not simply to achieve a high recommendation metric.
+
+The project aims to demonstrate how a recommendation model can be transformed into an **end-to-end machine-learning application**:
+
+```text
+Raw E-Commerce Events
+        ↓
+Data Processing
+        ↓
+Feature Engineering
+        ↓
+Model Training
+        ↓
+Evaluation
+        ↓
+MLflow Model Management
+        ↓
+Prediction Pipeline
+        ↓
+Persistent User History
+        ↓
+Recommendation Service
+        ↓
+Streamlit Storefront
+        ↓
+User Interaction
+        ↓
+Updated History
+        ↓
+Personalized Recommendations
+```
+
+ShopSense therefore combines **machine learning, recommendation systems, software engineering, model management, persistence, testing, and application development** into one project.
